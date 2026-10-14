@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+bidiq.db
+uploads/
+.venv/
+*.pdf
+!samples/*.pdf
+.env
+inbox/

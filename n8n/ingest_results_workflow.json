@@ -1,0 +1,53 @@
+{
+  "name": "BidIQ — ingest new auction result PDFs",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerOn": "folder",
+        "path": "/data/inbox/results",
+        "events": ["add"]
+      },
+      "name": "Watch results folder",
+      "type": "n8n-nodes-base.localFileTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $json.path }}"
+      },
+      "name": "Read PDF",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BIDIQ_URL }}/api/ingest/results",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Authorization", "value": "=Bearer {{ $env.BIDIQ_TOKEN }}" }]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            { "parameterType": "formBinaryData", "name": "file", "inputDataFieldName": "data" },
+            { "name": "visibility", "value": "shared" }
+          ]
+        }
+      },
+      "name": "POST to BidIQ /ingest/results",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, 300]
+    }
+  ],
+  "connections": {
+    "Watch results folder": { "main": [[{ "node": "Read PDF", "type": "main", "index": 0 }]] },
+    "Read PDF": { "main": [[{ "node": "POST to BidIQ /ingest/results", "type": "main", "index": 0 }]] }
+  },
+  "settings": {},
+  "pinData": {}
+}

@@ -1,0 +1,62 @@
+# auctionbidiq — production stack (Postgres + app)
+# VPS: srv1334765.hstgr.cloud   ·   Traefik + n8n_default network (same as loadledger / insurancechekr)
+#
+# Usage (on the VPS, from /docker/auctionbidiq/deploy):
+#   cp auctionbidiq.env.example .env   # then fill in the secrets
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+#
+# The app container serves both the API (/api/*) and the web UI, and is the only
+# one exposed (via Traefik, auto-SSL).
+
+services:
+  auctionbidiq-db:
+    image: postgres:16-alpine
+    container_name: auctionbidiq-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: auctionbidiq
+      POSTGRES_USER: auctionbidiq
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - auctionbidiq-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auctionbidiq"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [ n8n_default ]
+
+  auctionbidiq-app:
+    build:
+      context: ..
+      dockerfile: deploy/app.Dockerfile
+    container_name: auctionbidiq-app
+    restart: unless-stopped
+    depends_on:
+      auctionbidiq-db:
+        condition: service_healthy
+    # Secrets loaded literally (no ${} interpolation) so passwords with $ survive.
+    env_file:
+      - .env
+    environment:
+      BIDIQ_DATABASE_URL: postgresql+psycopg://auctionbidiq:${DB_PASSWORD}@auctionbidiq-db:5432/auctionbidiq
+      BIDIQ_UPLOAD_DIR: /app/uploads
+    volumes:
+      - auctionbidiq-uploads:/app/uploads
+    networks: [ n8n_default ]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=n8n_default"
+      - "traefik.http.routers.auctionbidiq.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.auctionbidiq.entrypoints=websecure"
+      - "traefik.http.routers.auctionbidiq.tls=true"
+      - "traefik.http.routers.auctionbidiq.tls.certresolver=httpresolver"
+      - "traefik.http.services.auctionbidiq.loadbalancer.server.port=8000"
+
+volumes:
+  auctionbidiq-pgdata:
+  auctionbidiq-uploads:
+
+networks:
+  n8n_default:
+    external: true
