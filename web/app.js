@@ -326,6 +326,11 @@ async function viewTargets(app, _arg, params) {
       <a class="btn" href="#/price">+ Add via Quick price</a>
       <a class="btn" href="#/bidsheet${saleId ? "?sale_id=" + encodeURIComponent(saleId) : ""}">Printable bid sheet</a>
       <button id="csv">Export CSV</button></div></div>
+    <details class="panel" id="catPanel"${sheet.rows.length ? "" : " open"}><summary><b>Import upcoming lots from catalog files</b> <span class="muted small">— several PDFs/CSVs at once</span></summary>
+      <form id="tc" style="margin-top:8px">${uploaderHtml("catalog PDFs / CSVs")}
+        <div class="grid g3"><div><label>Sale ID <span class="muted">(blank = read from each filename)</span></label><input name="sale_id" value="${esc(saleId)}" placeholder="e.g. 2026101"></div>
+        <div><label>Sale date</label><input type="date" name="sale_date"></div><div><label>Location</label><input name="location"></div></div>
+        <p><button class="primary">Import catalogs</button></p></form></details>
     ${saleId ? `<div id="saleEdit"></div>` : ""}
     <div class="panel"><div class="table-wrap"><table>
       <tr><th>Sale</th><th>Lot</th><th>Unit</th><th class="num">Miles/Hrs</th><th>CDL</th><th class="num">N</th><th>Conf.</th>
@@ -345,6 +350,7 @@ async function viewTargets(app, _arg, params) {
     </table></div></div>`;
   $("#saleSel").onchange = (e) => location.hash = "#/targets" + (e.target.value ? "?sale_id=" + encodeURIComponent(e.target.value) : "");
   $("#csv").onclick = () => downloadAuthed("/bidsheet.csv" + (saleId ? "?sale_id=" + encodeURIComponent(saleId) : ""), `bidsheet_${saleId || "all"}.csv`);
+  bindUploader($("#tc"), "/ingest/catalog", { prepare: catalogPrepare, done: catalogDone, after: () => setTimeout(router, 1500) });
   if (saleId) renderSaleEditor($("#saleEdit"), sales.find((s) => s.sale_id === saleId) || { sale_id: saleId });
 }
 
@@ -549,45 +555,146 @@ async function viewMultilot(app) {
   $("#mf").onsubmit = async (e) => { e.preventDefault(); results = {}; try { await doPlan(); } catch (err) { toast(err.message); } };
 }
 
+// ------------------------------------------------------------------ multi-file uploader (shared)
+const UPLOAD_EXT = /\.(pdf|csv)$/i;
+const fmtSize = (b) => b > 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
+// "2026101_catalog.pdf" / "T&M 2026055 results.pdf" -> "2026101" / "2026055"
+const saleIdFromName = (name) => { const m = name.match(/(?:^|[^0-9])(\d{6,8})(?![0-9])/); return m ? m[1] : null; };
+
+function uploaderHtml(label) {
+  return `<div class="drop" tabindex="0" role="button" aria-label="Choose ${label} to upload">
+      <input type="file" class="files" accept=".pdf,.csv" multiple hidden>
+      <div><b>Drop ${label} here</b> or <a href="#" class="pick">choose files</a></div>
+      <div class="small muted">Select several files at once — they upload one at a time.</div>
+    </div>
+    <ul class="filelist small"></ul>`;
+}
+
+/* Wire a form containing uploaderHtml().
+   opts.prepare(file, form, many) -> {fields} sent with that file, or a string error for that file.
+   opts.done(result) -> one-line summary. opts.after() runs once when the batch finishes. */
+function bindUploader(form, path, opts) {
+  const input = $(".files", form), list = $(".filelist", form), drop = $(".drop", form), btn = $("button.primary", form);
+  btn.dataset.label = btn.textContent;
+  let files = [];
+  const render = () => {
+    list.innerHTML = files.map((f, i) => `<li><span class="st">${f.status || "•"}</span> ${esc(f.file.name)} <span class="muted">${fmtSize(f.file.size)}</span>
+      ${f.status ? "" : `<a href="#" data-rm="${i}" title="Remove">✕</a>`}${f.msg ? `<div class="msg ${f.ok === false ? "err" : ""}">${esc(f.msg)}</div>` : ""}</li>`).join("");
+    $$("[data-rm]", list).forEach((a) => a.onclick = (e) => { e.preventDefault(); files.splice(+a.dataset.rm, 1); render(); });
+    const pending = files.filter((f) => !f.status).length;
+    btn.textContent = btn.dataset.label + (pending > 1 ? ` (${pending} files)` : "");
+    if (opts.onCount) opts.onCount(pending, form);
+  };
+  const add = (fl) => {
+    if (files.length && files.every((f) => f.status)) files = [];  // a finished batch is replaced by the next one
+    for (const f of fl) {
+      if (!UPLOAD_EXT.test(f.name)) { toast(`Skipped ${f.name} — only PDF or CSV`); continue; }
+      if (!files.some((x) => x.file.name === f.name && x.file.size === f.size)) files.push({ file: f });
+    }
+    render();
+  };
+  $(".pick", form).onclick = (e) => { e.preventDefault(); e.stopPropagation(); input.click(); };
+  drop.onclick = () => input.click();
+  drop.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } };
+  input.onclick = (e) => e.stopPropagation();
+  input.onchange = () => { add(input.files); input.value = ""; };
+  ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", (e) => add(e.dataTransfer.files));
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const todo = files.filter((f) => !f.status);
+    if (!todo.length) { toast("Choose at least one PDF or CSV file"); return; }
+    btn.disabled = true;
+    let ok = 0;
+    for (const f of todo) {
+      const prep = opts.prepare(f.file, form, todo.length > 1);
+      if (typeof prep === "string") { Object.assign(f, { status: "✗", ok: false, msg: prep }); render(); continue; }
+      Object.assign(f, { status: "⏳", msg: "uploading…" });
+      render();
+      const fd = new FormData();
+      fd.append("file", f.file);
+      for (const [k, v] of Object.entries(prep)) if (v !== null && v !== undefined && v !== "") fd.append(k, v);
+      try { const r = await api(path, { body: fd }); Object.assign(f, { status: "✓", ok: true, msg: opts.done(r) }); ok++; }
+      catch (err) { Object.assign(f, { status: "✗", ok: false, msg: err.message }); }
+      render();
+    }
+    btn.disabled = false;
+    toast(`${ok} of ${todo.length} file(s) ingested`);
+    META = null;
+    if (opts.after) opts.after();
+  };
+  render();
+}
+
+// One typed sale ID applies to every file; if blank, read it from each filename.
+function saleIdFor(file, form, many) {
+  const typed = (form.elements.sale_id.value || "").trim();
+  if (typed) return { sale_id: typed };
+  const guess = saleIdFromName(file.name);
+  if (guess) return { sale_id: guess };
+  return many ? "No sale ID in this filename — type a Sale ID above" : "Enter the Sale ID";
+}
+
+function catalogPrepare(file, form, many) {
+  const sid = saleIdFor(file, form, many);
+  if (typeof sid === "string") return sid;
+  return { ...sid, sale_date: form.elements.sale_date.value, location: form.elements.location.value };
+}
+const catalogDone = (r) => `Sale ${r.sale_id}: ${r.created} new / ${r.updated} updated target lots`;
+
 // ------------------------------------------------------------------ ingest
+function ingestLogRows(log) {
+  return log.map((l) => `<tr><td class="small">${esc(l.created_at.replace("T", " ").slice(0, 16))}</td><td>${esc(l.kind)}${l.shared ? ' <span class="chip">shared</span>' : ""}</td><td class="small">${esc(l.filename)}</td><td>${esc(l.sale_id || "")}</td><td class="num">${l.rows}</td><td><span class="chip ${l.status === "ok" ? "good" : "medium"}">${esc(l.status)}</span></td><td class="small">${esc(l.message || "")}</td></tr>`).join("");
+}
+
 async function viewIngest(app) {
   const log = await api("/ingest/log");
   app.innerHTML = `<div class="grid g3">
-    <form class="panel" id="fr"><h2>Auction result sheet</h2>
-      <p class="small muted">T&amp;M "PRICE LISTING BY TYPE/LOT#" PDF (coordinate-bucketed parse) or a comps CSV. Re-ingesting a sale replaces its rows.</p>
-      <input type="file" name="file" accept=".pdf,.csv" required>
-      <label>Sale ID override (only if the header is missing)</label><input name="sale_id">
-      <label>Visibility</label><select name="visibility"><option value="shared">Shared comp pool</option><option value="private">Private to my tenant</option></select>
+    <form class="panel" id="fr"><h2>Auction result sheets</h2>
+      <p class="small muted">T&amp;M "PRICE LISTING BY TYPE/LOT#" PDFs (coordinate-bucketed parse) or comps CSVs. Each sheet's header gives its sale; re-ingesting a sale replaces its rows.</p>
+      ${uploaderHtml("result sheets")}
+      <div id="ovr"><label>Sale ID override (single file, only if the header is missing)</label><input name="sale_id"></div>
+      <label>Visibility</label><select name="visibility"><option value="shared">Shared comp pool</option><option value="private">Private to my workspace</option></select>
       <p><button class="primary">Ingest results</button></p>
       <details><summary>CSV columns</summary><div class="small mono">sale_id, sale_date, location, lot_no, lot_type, year, make, class, model, engine, desc, trans, miles, hours, hours_metric, door_type, branded, non_op, sold_price</div></details></form>
-    <form class="panel" id="fc"><h2>Catalog (upcoming sale)</h2>
-      <p class="small muted">Catalog PDF (heuristic extraction — review each lot) or CSV. Creates/updates target lots.</p>
-      <input type="file" name="file" accept=".pdf,.csv" required>
-      <label>Sale ID</label><input name="sale_id" required>
+    <form class="panel" id="fc"><h2>Catalogs (upcoming sale)</h2>
+      <p class="small muted">Catalog PDFs (heuristic extraction — review each lot) or CSVs. Creates/updates target lots.</p>
+      ${uploaderHtml("catalogs")}
+      <label>Sale ID <span class="muted">(blank = read from each filename)</span></label><input name="sale_id" placeholder="e.g. 2026101">
       <div class="form-grid"><div><label>Sale date</label><input type="date" name="sale_date"></div><div><label>Location</label><input name="location"></div></div>
-      <p><button class="primary">Ingest catalog</button></p>
+      <p><button class="primary">Ingest catalogs</button></p>
       <details><summary>CSV columns</summary><div class="small mono">lot_no, year, make, model, class, engine, desc, trans, miles, hours, hours_metric, vin, gvwr, front_axle, rear_axle, body_length, apu, sleeper_size, liftgate, door, engine_brake, notes</div></details></form>
-    <form class="panel" id="fm"><h2>Mileage / reefer-hours sheet</h2>
+    <form class="panel" id="fm"><h2>Mileage / reefer-hours sheets</h2>
       <p class="small muted">Joins on lot #. Flags ODOM vs ECM mismatch; records whether hours are Total, Engine or Electric (not comparable).</p>
-      <input type="file" name="file" accept=".pdf,.csv" required>
-      <label>Sale ID</label><input name="sale_id" required>
-      <p><button class="primary">Ingest sheet</button></p>
+      ${uploaderHtml("sheets")}
+      <label>Sale ID <span class="muted">(blank = read from each filename)</span></label><input name="sale_id" placeholder="e.g. 2026101">
+      <p><button class="primary">Ingest sheets</button></p>
       <details><summary>CSV columns</summary><div class="small mono">lot, odometer (thousands ok), ecm_miles, total_hours, engine_hours, electric_hours</div></details></form>
   </div>
-  <div class="panel"><h2>Ingest log</h2><div class="table-wrap"><table><tr><th>When</th><th>Kind</th><th>File</th><th>Sale</th><th class="num">Rows</th><th>Status</th><th>Message</th></tr>
-    ${log.map((l) => `<tr><td class="small">${esc(l.created_at.replace("T", " ").slice(0, 16))}</td><td>${esc(l.kind)}${l.shared ? ' <span class="chip">shared</span>' : ""}</td><td class="small">${esc(l.filename)}</td><td>${esc(l.sale_id || "")}</td><td class="num">${l.rows}</td><td><span class="chip ${l.status === "ok" ? "good" : "medium"}">${esc(l.status)}</span></td><td class="small">${esc(l.message || "")}</td></tr>`).join("")}
+  <div class="panel"><h2>Ingest log</h2><div class="table-wrap"><table id="logTable"><tr><th>When</th><th>Kind</th><th>File</th><th>Sale</th><th class="num">Rows</th><th>Status</th><th>Message</th></tr>
+    ${ingestLogRows(log)}
   </table></div></div>`;
-  const bind = (id, path, done) => $(id).onsubmit = async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    for (const [k, v] of [...fd.entries()]) if (v === "") fd.delete(k);
-    const btn = $("button", e.target); btn.disabled = true;
-    try { const r = await api(path, { body: fd }); toast(done(r)); META = null; router(); }
-    catch (err) { toast(err.message); } finally { btn.disabled = false; }
+  const refreshLog = async () => {
+    const l = await api("/ingest/log");
+    const t = $("#logTable");
+    t.innerHTML = t.rows[0].outerHTML + ingestLogRows(l);
   };
-  bind("#fr", "/ingest/results", (r) => r.sale_id ? `Sale ${r.sale_id}: ${r.rows} lots (replaced ${r.replaced})` : `${r.rows} comps across ${r.sales} sales`);
-  bind("#fc", "/ingest/catalog", (r) => `${r.created} new / ${r.updated} updated target lots`);
-  bind("#fm", "/ingest/mileage", (r) => `${r.matched}/${r.rows} matched, ${r.tamper_flags} tamper flags`);
+  bindUploader($("#fr"), "/ingest/results", {
+    // an override would merge every file into one sale, so it only applies to a single file
+    prepare: (file, form, many) => ({ visibility: form.elements.visibility.value, sale_id: many ? "" : form.elements.sale_id.value.trim() }),
+    done: (r) => r.sale_id
+      ? `Sale ${r.sale_id} ${r.location || ""}: ${r.rows} lots (replaced ${r.replaced})${r.skipped_lines && r.skipped_lines.length ? `, ${r.skipped_lines.length} unparsed lines — see log` : ""}`
+      : `${r.rows} comps across ${r.sales} sales`,
+    onCount: (n, form) => { $("#ovr", form).hidden = n > 1; },
+    after: refreshLog,
+  });
+  bindUploader($("#fc"), "/ingest/catalog", { prepare: catalogPrepare, done: catalogDone, after: refreshLog });
+  bindUploader($("#fm"), "/ingest/mileage", {
+    prepare: (file, form, many) => saleIdFor(file, form, many),
+    done: (r) => `Sale ${r.sale_id}: ${r.matched}/${r.rows} lots matched, ${r.tamper_flags} tamper flags`,
+    after: refreshLog,
+  });
 }
 
 // ------------------------------------------------------------------ comps

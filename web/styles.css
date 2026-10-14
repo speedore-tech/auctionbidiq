@@ -101,6 +101,14 @@ tr.excluded td { opacity: .55; }
 .chart .marker { stroke-width: 1.5; stroke-dasharray: 4 3; }
 .slider-row { display: grid; grid-template-columns: 1fr 90px; gap: 8px; align-items: center; }
 .slider-row output { font-variant-numeric: tabular-nums; text-align: right; font-size: 13px; }
+.drop { border: 2px dashed var(--line); border-radius: 10px; padding: 14px; text-align: center; cursor: pointer; margin: 6px 0; }
+.drop.over, .drop:focus-visible { border-color: var(--accent); background: var(--info-bg); outline: none; }
+.filelist { list-style: none; padding: 0; margin: 4px 0; max-height: 260px; overflow: auto; }
+.filelist li { padding: 4px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.filelist .st { display: inline-block; width: 18px; }
+.filelist .msg { color: var(--muted); padding-left: 18px; }
+.filelist .msg.err { color: var(--bad); }
+details.panel > summary { color: var(--ink); margin: 0; }
 details summary { cursor: pointer; color: var(--accent); margin: 6px 0; }
 .login { max-width: 380px; margin: 60px auto; }
 .tabs { display: flex; gap: 4px; margin-bottom: 10px; }
