@@ -10,7 +10,24 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATABASE_URL = os.environ.get("BIDIQ_DATABASE_URL", f"sqlite:///{BASE_DIR / 'bidiq.db'}")
+def _database_url() -> str:
+    """BIDIQ_DATABASE_URL wins; else build a Postgres URL from parts (password URL-encoded,
+    so @ : / # % in it can't break the URL); else local SQLite."""
+    if os.environ.get("BIDIQ_DATABASE_URL"):
+        return os.environ["BIDIQ_DATABASE_URL"]
+    host = os.environ.get("BIDIQ_DB_HOST")
+    if host:
+        from urllib.parse import quote
+
+        user = quote(os.environ.get("BIDIQ_DB_USER", "auctionbidiq"), safe="")
+        pw = quote(os.environ.get("BIDIQ_DB_PASSWORD") or os.environ.get("DB_PASSWORD", ""), safe="")
+        port = os.environ.get("BIDIQ_DB_PORT", "5432")
+        name = os.environ.get("BIDIQ_DB_NAME", "auctionbidiq")
+        return f"postgresql+psycopg://{user}:{pw}@{host}:{port}/{name}"
+    return f"sqlite:///{BASE_DIR / 'bidiq.db'}"
+
+
+DATABASE_URL = _database_url()
 UPLOAD_DIR = Path(os.environ.get("BIDIQ_UPLOAD_DIR", BASE_DIR / "uploads"))
 TOKEN_TTL_DAYS = int(os.environ.get("BIDIQ_TOKEN_TTL_DAYS", "30"))
 # Public self-service sign-up. Turn off in production; create accounts with scripts/create_admin.py.

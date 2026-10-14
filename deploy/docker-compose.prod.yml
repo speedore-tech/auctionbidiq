@@ -39,7 +39,11 @@ services:
     env_file:
       - .env
     environment:
-      BIDIQ_DATABASE_URL: postgresql+psycopg://auctionbidiq:${DB_PASSWORD}@auctionbidiq-db:5432/auctionbidiq
+      # The app builds the DB URL itself and URL-encodes DB_PASSWORD (read from .env),
+      # so special characters in the password are safe.
+      BIDIQ_DB_HOST: auctionbidiq-db
+      BIDIQ_DB_USER: auctionbidiq
+      BIDIQ_DB_NAME: auctionbidiq
       BIDIQ_UPLOAD_DIR: /app/uploads
     volumes:
       - auctionbidiq-uploads:/app/uploads

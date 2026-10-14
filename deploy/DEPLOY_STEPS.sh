@@ -81,6 +81,18 @@ docker compose -f docker-compose.prod.yml --env-file .env up -d --build
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# TROUBLESHOOTING — "Container ... is restarting" / app won't start
+# ═══════════════════════════════════════════════════════════════════════════
+docker logs auctionbidiq-app --tail=40          # the real error is at the bottom
+#  • "password authentication failed"  → DB_PASSWORD was changed after the first
+#    start. Postgres keeps the original password in its volume. On a fresh install
+#    with no data yet, reset it:
+#      docker compose -f docker-compose.prod.yml down -v   # ⚠ deletes the DB volume
+#      docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+#  • "failed to resolve host" → old build that put the password in a URL; git pull + rebuild.
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # USEFUL COMMANDS
 # ═══════════════════════════════════════════════════════════════════════════
 docker logs auctionbidiq-app -f --tail=100
