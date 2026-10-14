@@ -32,6 +32,13 @@ UPLOAD_DIR = Path(os.environ.get("BIDIQ_UPLOAD_DIR", BASE_DIR / "uploads"))
 TOKEN_TTL_DAYS = int(os.environ.get("BIDIQ_TOKEN_TTL_DAYS", "30"))
 # Public self-service sign-up. Turn off in production; create accounts with scripts/create_admin.py.
 ALLOW_REGISTRATION = os.environ.get("BIDIQ_ALLOW_REGISTRATION", "true").lower() in ("1", "true", "yes")
+# Platform owners: can see every workspace and create new partner workspaces from the Users page.
+# Defaults to the seeded admin email.
+SUPERADMIN_EMAILS = {
+    e.strip().lower()
+    for e in (os.environ.get("BIDIQ_SUPERADMIN_EMAILS") or os.environ.get("SEED_ADMIN_EMAIL") or "").split(",")
+    if e.strip()
+}
 
 DEFAULT_SETTINGS: dict = {
     # --- home / transport (spec §8.2) ---

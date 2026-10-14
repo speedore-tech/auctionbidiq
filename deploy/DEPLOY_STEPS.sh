@@ -43,6 +43,10 @@ docker logs auctionbidiq-app --tail=50
 # STEP 4 [VPS] — Create the admin login (one time; re-run to reset the password)
 # ─────────────────────────────────────────────────────────────────────────────
 docker compose -f docker-compose.prod.yml exec auctionbidiq-app python scripts/create_admin.py
+# Can't log in? List logins, then reset by typing the password at the prompt (bypasses .env):
+docker compose -f docker-compose.prod.yml exec auctionbidiq-app python scripts/create_admin.py --list
+docker compose -f docker-compose.prod.yml exec auctionbidiq-app python scripts/create_admin.py admin@speedore.com
+# After that, add/reset/remove logins for partners on the Users page in the app.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

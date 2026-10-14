@@ -61,3 +61,45 @@ def test_end_to_end(tmp_path):
     bad = client.post("/api/fmv", headers=a, json={"model_group": "FRTL_M2_106", "year_lo": 2018, "year_hi": 2020,
                                                    "tier": "private", "price": 60000, "source": "Ritchie Bros auction"})
     assert bad.status_code == 400
+
+
+def test_user_management():
+    owner = _register("owner@example.test", "Owner Co")
+    # make the owner a platform superadmin for this test
+    import bidiq.auth as auth_mod
+    auth_mod.SUPERADMIN_EMAILS.add("owner@example.test")
+    try:
+        r = client.post("/api/users", headers=owner, json={"email": "teammate@example.test", "password": "team-pass-123",
+                                                            "role": "member", "workspace": "mine"})
+        assert r.status_code == 200, r.text
+        r = client.post("/api/users", headers=owner, json={"email": "partner@example.test", "password": "partner-pass-1",
+                                                            "role": "admin", "workspace": "new", "workspace_name": "Partner LLC"})
+        assert r.status_code == 200 and r.json()["tenant"] == "Partner LLC"
+        assert client.post("/api/users", headers=owner, json={"email": "teammate@example.test", "password": "x" * 9}).status_code == 400
+
+        mate = {"Authorization": "Bearer " + client.post("/api/auth/login", json={"email": "teammate@example.test", "password": "team-pass-123"}).json()["token"]}
+        assert client.get("/api/users", headers=mate).status_code == 403          # members can't manage logins
+        assert client.put("/api/settings", headers=mate, json={"aggressiveness": 0.9}).status_code == 403
+        t = client.post("/api/targets", headers=owner, json={"year": 2019, "make": "FRTL", "model_raw": "M2 106"}).json()
+        assert any(x["id"] == t["id"] for x in client.get("/api/targets", headers=mate).json())  # same workspace shares targets
+
+        partner = {"Authorization": "Bearer " + client.post("/api/auth/login", json={"email": "partner@example.test", "password": "partner-pass-1"}).json()["token"]}
+        assert not any(x["id"] == t["id"] for x in client.get("/api/targets", headers=partner).json())
+        users_seen = client.get("/api/users", headers=partner).json()["users"]
+        assert [u["email"] for u in users_seen] == ["partner@example.test"]      # partner admin sees only own workspace
+        mate_id = next(u["id"] for u in client.get("/api/users", headers=owner).json()["users"] if u["email"] == "teammate@example.test")
+        assert client.put(f"/api/users/{mate_id}", headers=partner, json={"password": "hijack-pass-1"}).status_code == 404
+
+        # reset password signs the user out; new password works
+        assert client.put(f"/api/users/{mate_id}", headers=owner, json={"password": "new-team-pass"}).status_code == 200
+        assert client.get("/api/auth/me", headers=mate).status_code == 401
+        assert client.post("/api/auth/login", json={"email": "teammate@example.test", "password": "new-team-pass"}).status_code == 200
+
+        # change own password
+        assert client.post("/api/auth/password", headers=owner, json={"current_password": "wrong", "new_password": "abcdefgh1"}).status_code == 400
+        assert client.post("/api/auth/password", headers=owner, json={"current_password": "test-pass-123", "new_password": "owner-pass-2"}).status_code == 200
+
+        assert client.delete(f"/api/users/{mate_id}", headers=owner).status_code == 200
+        assert client.post("/api/auth/login", json={"email": "teammate@example.test", "password": "new-team-pass"}).status_code == 401
+    finally:
+        auth_mod.SUPERADMIN_EMAILS.discard("owner@example.test")

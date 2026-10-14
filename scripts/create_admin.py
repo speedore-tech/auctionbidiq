@@ -1,7 +1,11 @@
 """Create (or reset the password of) a tenant admin login. Used on the VPS instead of public sign-up.
 
     python scripts/create_admin.py                       # reads SEED_ADMIN_EMAIL / SEED_ADMIN_PASSWORD / SEED_TENANT_NAME
-    python scripts/create_admin.py you@x.com "Tenant"    # prompts for the password
+    python scripts/create_admin.py you@x.com "Tenant"    # prompts for the password (bypasses .env)
+    python scripts/create_admin.py --list                # show existing logins
+
+Tip: a "$" in .env values is mangled by docker compose — if a login made from .env
+doesn't work, re-run with your email as an argument and type the password at the prompt.
 """
 from __future__ import annotations
 
@@ -19,7 +23,21 @@ from bidiq.db import SessionLocal, init_db  # noqa: E402
 from bidiq.models import Tenant, User  # noqa: E402
 
 
+def list_users() -> int:
+    init_db()
+    db = SessionLocal()
+    tenants = {t.id: t.name for t in db.scalars(select(Tenant))}
+    users = db.scalars(select(User).order_by(User.tenant_id, User.email)).all()
+    if not users:
+        print("No logins exist yet.")
+    for u in users:
+        print(f"{u.email:40} {u.role:7} workspace #{u.tenant_id} {tenants.get(u.tenant_id, '?')}")
+    return 0
+
+
 def main() -> int:
+    if "--list" in sys.argv:
+        return list_users()
     email = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("SEED_ADMIN_EMAIL", "")).strip().lower()
     tenant_name = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("SEED_TENANT_NAME", "Speedore")
     password = os.environ.get("SEED_ADMIN_PASSWORD") if len(sys.argv) <= 1 else None
@@ -36,7 +54,8 @@ def main() -> int:
     user = db.scalar(select(User).where(User.email == email))
     if user:
         user.password_hash = hash_password(password)
-        print(f"Reset password for {email}")
+        user.role = "admin"
+        print(f"Reset password for {email} (role: admin)")
     else:
         t = Tenant(name=tenant_name, settings={})
         db.add(t)

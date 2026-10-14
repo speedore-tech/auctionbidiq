@@ -58,8 +58,9 @@ const opt = (vals, sel, blank = true) => (blank ? '<option value=""></option>' :
 const routes = {
   login: viewLogin, dashboard: viewDashboard, price: viewPrice, targets: viewTargets, target: viewTarget,
   live: viewLive, bidsheet: viewBidsheet, multilot: viewMultilot, ingest: viewIngest, comps: viewComps,
-  fmv: viewFmv, outcomes: viewOutcomes, settings: viewSettings,
+  fmv: viewFmv, outcomes: viewOutcomes, settings: viewSettings, users: viewUsers,
 };
+let ME = null;
 async function router() {
   const [path, query] = (location.hash.slice(2) || "dashboard").split("?");
   const [name, arg] = path.split("/");
@@ -74,7 +75,7 @@ async function router() {
 }
 window.addEventListener("hashchange", router);
 window.addEventListener("load", async () => {
-  if (store.token) { try { const me = await api("/auth/me"); $("#who").innerHTML = `${esc(me.tenant)} · ${esc(me.email)} · <a href="#" id="logout">Log out</a>`; $("#logout").onclick = (e) => { e.preventDefault(); store.token = null; location.hash = "#/login"; }; } catch { } }
+  if (store.token) { try { const me = await api("/auth/me"); ME = me; $("#navUsers").hidden = !me.is_admin; $("#who").innerHTML = `${esc(me.tenant)} · ${esc(me.email)} · <a href="#" id="logout">Log out</a>`; $("#logout").onclick = (e) => { e.preventDefault(); store.token = null; location.hash = "#/login"; }; } catch { } }
   router();
 });
 
@@ -690,11 +691,60 @@ async function viewSettings(app) {
     <h3>Multi-lot &amp; deposits</h3><div class="grid g4">${f("multi_lot_max_wins", "Max wins per sale")}${f("multi_lot_deescalate_pct", "De-escalate after win %")}${f("default_deposit_amount", "Default deposit $")}${f("default_wire_deadline", "Default wire deadline", "text")}${f("default_payment_window_hours", "Payment window (h)")}</div>
     <h3>Comp store</h3><label><input type="checkbox" name="include_private_comps" ${s.include_private_comps ? "checked" : ""}> Include my private comps in pricing</label>
       <label><input type="checkbox" name="contribute_to_shared" ${s.contribute_to_shared ? "checked" : ""}> Allow uploading result sheets to the shared pool</label>
-    <p><button class="primary">Save settings</button></p></form>`;
+    <p>${ME && !ME.is_admin ? '<span class="muted small">Only workspace admins can change settings.</span>' : '<button class="primary">Save settings</button>'}</p></form>
+    <form class="panel" id="pwf" style="max-width:420px"><h2>Change my password</h2>
+      <label>Current password</label><input type="password" name="current_password" required autocomplete="current-password">
+      <label>New password (8+ characters)</label><input type="password" name="new_password" required minlength="8" autocomplete="new-password">
+      <p><button>Change password</button></p></form>`;
+  $("#pwf").onsubmit = async (e) => {
+    e.preventDefault();
+    try { await api("/auth/password", { body: formData(e.target) }); e.target.reset(); toast("Password changed"); } catch (err) { toast(err.message); }
+  };
   $("#sf").onsubmit = async (e) => {
     e.preventDefault();
     const d = formData(e.target);
     d.risk_reserves = {}; $$("[data-rr]", e.target).forEach((i) => d.risk_reserves[i.dataset.rr] = Number(i.value || 0));
     try { await api("/settings", { method: "PUT", body: d }); toast("Settings saved"); } catch (err) { toast(err.message); }
   };
+}
+
+// ------------------------------------------------------------------ users
+async function viewUsers(app) {
+  const d = await api("/users");
+  const wsOpts = (d.can_create_workspace ? '<option value="new">➕ New separate workspace (partner buys on their own)</option>' : "") +
+    d.workspaces.map((w) => `<option value="${w.id === (ME && ME.tenant_id) ? "mine" : w.id}">${w.id === (ME && ME.tenant_id) ? "My workspace — " : ""}${esc(w.name)}${w.id === (ME && ME.tenant_id) ? " (shares my targets & bid sheets)" : ""}</option>`).join("");
+  app.innerHTML = `<div class="grid side">
+    <form class="panel" id="uf"><h2>Add a login</h2>
+      <label>Email</label><input name="email" type="email" required autocomplete="off">
+      <label>Temporary password (8+ characters)</label><input name="password" type="text" required minlength="8" autocomplete="off">
+      <label>Role</label><select name="role"><option value="member">Member — can use everything except users &amp; settings</option><option value="admin">Admin — can also manage logins &amp; settings</option></select>
+      <label>Workspace</label><select name="workspace" id="ws">${wsOpts.replace('value="mine"', 'value="mine" selected')}</select>
+      <div id="wsName" hidden><label>New workspace name</label><input name="workspace_name" placeholder="Partner's company name"></div>
+      <p><button class="primary">Create login</button></p>
+      <p class="small muted">Share the email and temporary password with them privately; they can change it under Settings → Change my password.
+      Everyone shares the sold-comp pool. Target lots, bid sheets, retail prices and outcomes are shared only within a workspace.</p></form>
+    <div class="panel"><h2>Logins</h2><div class="table-wrap"><table>
+      <tr><th>Email</th><th>Workspace</th><th>Role</th><th>Created</th><th></th></tr>
+      ${d.users.map((u) => `<tr><td>${esc(u.email)}${u.id === d.me ? ' <span class="chip">you</span>' : ""}</td><td>${esc(u.tenant || "")}</td>
+        <td><select data-role="${u.id}" style="width:auto" ${u.id === d.me ? "disabled" : ""}>${opt(["admin", "member"], u.role, false)}</select></td>
+        <td class="small">${esc((u.created_at || "").slice(0, 10))}</td>
+        <td class="row"><button type="button" data-reset="${u.id}" data-email="${esc(u.email)}">Reset password</button>${u.id === d.me ? "" : `<button type="button" class="danger" data-del="${u.id}" data-email="${esc(u.email)}">Remove</button>`}</td></tr>`).join("")}
+    </table></div></div></div>`;
+  $("#ws").onchange = (e) => { $("#wsName").hidden = e.target.value !== "new"; };
+  $("#uf").onsubmit = async (e) => {
+    e.preventDefault();
+    try { const u = await api("/users", { body: formData(e.target) }); toast(`Created ${u.email}`); router(); } catch (err) { toast(err.message); }
+  };
+  $$("[data-role]").forEach((sel) => sel.onchange = async () => {
+    try { await api("/users/" + sel.dataset.role, { method: "PUT", body: { role: sel.value } }); toast("Role updated"); } catch (err) { toast(err.message); router(); }
+  });
+  $$("[data-reset]").forEach((b) => b.onclick = async () => {
+    const pw = prompt(`New password for ${b.dataset.email} (8+ characters):`);
+    if (!pw) return;
+    try { await api("/users/" + b.dataset.reset, { method: "PUT", body: { password: pw } }); toast("Password reset — they've been signed out"); } catch (err) { toast(err.message); }
+  });
+  $$("[data-del]").forEach((b) => b.onclick = async () => {
+    if (!confirm(`Remove the login ${b.dataset.email}? Their workspace data is kept.`)) return;
+    try { await api("/users/" + b.dataset.del, { method: "DELETE" }); toast("Removed"); router(); } catch (err) { toast(err.message); }
+  });
 }

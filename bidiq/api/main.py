@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from ..auth import Ctx, current_ctx, hash_password, issue_token, verify_password
+from ..auth import Ctx, current_ctx, hash_password, issue_token, revoke_tokens, verify_password
 from ..config import ALLOW_REGISTRATION, BASE_DIR, DEFAULT_SETTINGS, UPLOAD_DIR, merged_settings
 from ..db import get_db, init_db
 from ..fmv import TIERS, fmv_row_dict, validate_source
@@ -90,7 +90,134 @@ def login(body: LoginIn, db: Session = Depends(get_db)):
 
 @app.get("/api/auth/me")
 def me(ctx: Ctx = Depends(current_ctx)):
-    return {"email": ctx.user.email, "tenant": ctx.tenant.name, "tenant_id": ctx.tenant_id, "role": ctx.user.role}
+    return {"email": ctx.user.email, "tenant": ctx.tenant.name, "tenant_id": ctx.tenant_id, "role": ctx.user.role,
+            "is_admin": ctx.is_admin, "is_superadmin": ctx.is_superadmin}
+
+
+class PasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/auth/password")
+def change_password(body: PasswordIn, ctx: Ctx = Depends(current_ctx)):
+    if not verify_password(body.current_password, ctx.user.password_hash):
+        raise HTTPException(400, "Current password is wrong")
+    _check_password(body.new_password)
+    ctx.user.password_hash = hash_password(body.new_password)
+    ctx.db.commit()
+    return {"ok": True}
+
+
+# ================================================================== user management
+ROLES = ("admin", "member")
+
+
+def _check_password(pw: str) -> None:
+    if len(pw or "") < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+
+
+def _user_row(u: User, tenants: dict) -> dict:
+    return {"id": u.id, "email": u.email, "role": u.role, "tenant_id": u.tenant_id,
+            "tenant": tenants.get(u.tenant_id), "created_at": u.created_at.isoformat() if u.created_at else None}
+
+
+def _managed_user(ctx: Ctx, uid: int) -> User:
+    ctx.require_admin()
+    u = ctx.db.get(User, uid)
+    if not u or (u.tenant_id != ctx.tenant_id and not ctx.is_superadmin):
+        raise HTTPException(404, "User not found")
+    return u
+
+
+@app.get("/api/users")
+def list_users(ctx: Ctx = Depends(current_ctx)):
+    ctx.require_admin()
+    st = select(User).order_by(User.tenant_id, User.email)
+    if not ctx.is_superadmin:
+        st = st.where(User.tenant_id == ctx.tenant_id)
+    tenants = {t.id: t.name for t in ctx.db.scalars(select(Tenant))}
+    return {"users": [_user_row(u, tenants) for u in ctx.db.scalars(st)],
+            "workspaces": [{"id": i, "name": n} for i, n in sorted(tenants.items())] if ctx.is_superadmin
+            else [{"id": ctx.tenant_id, "name": ctx.tenant.name}],
+            "can_create_workspace": ctx.is_superadmin, "me": ctx.user.id}
+
+
+class UserIn(BaseModel):
+    email: str
+    password: str
+    role: str = "member"
+    workspace: str = "mine"          # mine | new | <tenant id> (superadmin only for new/other)
+    workspace_name: str | None = None
+
+
+@app.post("/api/users")
+def create_user(body: UserIn, ctx: Ctx = Depends(current_ctx)):
+    ctx.require_admin()
+    email = body.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(400, "Enter a valid email")
+    if body.role not in ROLES:
+        raise HTTPException(400, f"Role must be one of {ROLES}")
+    _check_password(body.password)
+    if ctx.db.scalar(select(User).where(User.email == email)):
+        raise HTTPException(400, "A login with that email already exists — reset its password instead")
+    if body.workspace == "mine":
+        tid = ctx.tenant_id
+    elif not ctx.is_superadmin:
+        raise HTTPException(403, "Only the platform owner can create users in other workspaces")
+    elif body.workspace == "new":
+        if not (body.workspace_name or "").strip():
+            raise HTTPException(400, "Name the new workspace (e.g. the partner's company)")
+        t = Tenant(name=body.workspace_name.strip(), settings={})
+        ctx.db.add(t)
+        ctx.db.flush()
+        tid = t.id
+    else:
+        t = ctx.db.get(Tenant, int(body.workspace)) if body.workspace.isdigit() else None
+        if not t:
+            raise HTTPException(400, "Unknown workspace")
+        tid = t.id
+    u = User(tenant_id=tid, email=email, password_hash=hash_password(body.password), role=body.role)
+    ctx.db.add(u)
+    ctx.db.commit()
+    tenants = {t.id: t.name for t in ctx.db.scalars(select(Tenant))}
+    return _user_row(u, tenants)
+
+
+class UserUpdate(BaseModel):
+    password: str | None = None
+    role: str | None = None
+
+
+@app.put("/api/users/{uid}")
+def update_user(uid: int, body: UserUpdate, ctx: Ctx = Depends(current_ctx)):
+    u = _managed_user(ctx, uid)
+    if body.role is not None:
+        if body.role not in ROLES:
+            raise HTTPException(400, f"Role must be one of {ROLES}")
+        if u.id == ctx.user.id and body.role != "admin" and not ctx.is_superadmin:
+            raise HTTPException(400, "You can't remove your own admin role")
+        u.role = body.role
+    if body.password:
+        _check_password(body.password)
+        u.password_hash = hash_password(body.password)
+        if u.id != ctx.user.id:
+            revoke_tokens(ctx.db, u.id)  # sign them out everywhere
+    ctx.db.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/users/{uid}")
+def delete_user(uid: int, ctx: Ctx = Depends(current_ctx)):
+    u = _managed_user(ctx, uid)
+    if u.id == ctx.user.id:
+        raise HTTPException(400, "You can't delete your own login")
+    revoke_tokens(ctx.db, u.id)
+    ctx.db.delete(u)
+    ctx.db.commit()
+    return {"deleted": uid}
 
 
 # ================================================================== settings & meta
@@ -101,6 +228,7 @@ def get_settings(ctx: Ctx = Depends(current_ctx)):
 
 @app.put("/api/settings")
 def put_settings(body: dict, ctx: Ctx = Depends(current_ctx)):
+    ctx.require_admin()
     cur = dict(ctx.tenant.settings or {})
     for k, v in body.items():
         if k in DEFAULT_SETTINGS:

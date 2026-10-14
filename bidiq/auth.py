@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
-from .config import TOKEN_TTL_DAYS, merged_settings
+from .config import SUPERADMIN_EMAILS, TOKEN_TTL_DAYS, merged_settings
 from .db import get_db
 from .models import AuthToken, Tenant, User
 
@@ -47,6 +47,17 @@ class Ctx:
         self.tenant = tenant
         self.tenant_id = tenant.id
         self.settings = merged_settings(tenant.settings)
+        self.is_superadmin = user.email.lower() in SUPERADMIN_EMAILS
+        self.is_admin = user.role == "admin" or self.is_superadmin
+
+    def require_admin(self) -> None:
+        if not self.is_admin:
+            raise HTTPException(403, "Only workspace admins can do this.")
+
+
+def revoke_tokens(db: Session, user_id: int) -> None:
+    for t in db.query(AuthToken).filter(AuthToken.user_id == user_id).all():
+        db.delete(t)
 
 
 def current_ctx(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> Ctx:

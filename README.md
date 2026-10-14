@@ -29,7 +29,7 @@ python scripts/ingest_folder.py path/to/result_pdfs/
 
 Tests: `python -m pytest`. Local Docker/Postgres: `docker compose up --build` (set `BIDIQ_DB_PASSWORD`).
 
-**Production (VPS):** see [deploy/DEPLOY_STEPS.sh](deploy/DEPLOY_STEPS.sh) — Postgres + app behind Traefik on the shared `n8n_default` network, same pattern as insurancechekr. Public sign-up is off (`BIDIQ_ALLOW_REGISTRATION=false`); create logins with `scripts/create_admin.py`.
+**Production (VPS):** see [deploy/DEPLOY_STEPS.sh](deploy/DEPLOY_STEPS.sh) — Postgres + app behind Traefik on the shared `n8n_default` network, same pattern as insurancechekr. Public sign-up is off (`BIDIQ_ALLOW_REGISTRATION=false`); create the first login with `scripts/create_admin.py`, then manage everyone else on the **Users** page (admins: own workspace; platform owner in `BIDIQ_SUPERADMIN_EMAILS`: can also create separate partner workspaces).
 
 ## How the spec maps to the code
 
