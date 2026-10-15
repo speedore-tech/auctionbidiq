@@ -1220,3 +1220,57 @@ async function viewUsers(app) {
     try { await api("/users/" + b.dataset.del, { method: "DELETE" }); toast("Removed"); router(); } catch (err) { toast(err.message); }
   });
 }
+
+// ------------------------------------------------------------------ click-to-sort for every table
+// Works on any table inside .table-wrap: click a header to sort ascending, again for descending.
+// Money / % / miles / hours / dates sort as numbers, lot ids naturally (2, 10, M-4, T-29); blanks go last.
+function sortValue(cell) {
+  if (!cell) return null;
+  const raw = (cell.dataset.sort ?? cell.innerText).trim().split("\n")[0].trim();
+  if (!raw || raw === "—" || raw === "-" || raw === "…") return null;
+  if (/^([A-Z]{1,2}-)?\d{1,4}[A-Z]?$/.test(raw)) {                 // lot number
+    const [p, n, s] = lotKey(raw);
+    return { t: 0, v: (p ? 100000 * (p.charCodeAt(0) - 64) : 0) + n + (s ? s.charCodeAt(0) / 1000 : 0) };
+  }
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return { t: 1, v: raw };      // ISO date / timestamp
+  const m = raw.replace(/[$,\s]/g, "").replace("−", "-").match(/^[+-]?\d+(\.\d+)?(k)?/i);
+  if (m) return { t: 0, v: parseFloat(m[0]) * (m[2] ? 1000 : 1) };
+  return { t: 1, v: raw.toLowerCase() };
+}
+
+function sortTable(table, th) {
+  const header = th.parentElement;
+  const col = [...header.children].indexOf(th);
+  const dir = th.dataset.dir === "asc" ? "desc" : "asc";
+  header.querySelectorAll("th").forEach((h) => { delete h.dataset.dir; h.querySelector(".sort-ind")?.remove(); });
+  th.dataset.dir = dir;
+  th.insertAdjacentHTML("beforeend", `<span class="sort-ind">${dir === "asc" ? " ▲" : " ▼"}</span>`);
+  const body = header.parentElement;
+  const rows = [...body.children].filter((r) => r !== header && r.tagName === "TR");
+  // find the cell under this column even when a row merges cells (e.g. "no price yet" spanning
+  // several columns): a merged cell counts as blank for the columns it covers
+  const cellAt = (r, c) => {
+    let x = 0;
+    for (const cell of r.cells) {
+      const span = cell.colSpan || 1;
+      if (c < x + span) return span === 1 ? cell : null;
+      x += span;
+    }
+    return null;
+  };
+  const sign = dir === "asc" ? 1 : -1;
+  const keyed = rows.map((r, i) => ({ r, i, k: sortValue(cellAt(r, col)) }));
+  keyed.sort((a, b) => {
+    if (a.k === null || b.k === null) return a.k === null && b.k === null ? a.i - b.i : a.k === null ? 1 : -1;
+    if (a.k.t !== b.k.t) return a.k.t - b.k.t;                          // numbers before text
+    return (a.k.v < b.k.v ? -1 : a.k.v > b.k.v ? 1 : a.i - b.i) * sign;
+  });
+  keyed.forEach((x) => body.appendChild(x.r));
+}
+
+document.addEventListener("click", (e) => {
+  const th = e.target.closest(".table-wrap th");
+  if (!th || e.target.closest("a, button, input, select, label")) return;
+  const table = th.closest("table");
+  if (table) sortTable(table, th);
+});
