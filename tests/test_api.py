@@ -103,3 +103,45 @@ def test_user_management():
         assert client.post("/api/auth/login", json={"email": "teammate@example.test", "password": "new-team-pass"}).status_code == 401
     finally:
         auth_mod.SUPERADMIN_EMAILS.discard("owner@example.test")
+
+
+def test_tm_presale_documents_link_by_date(tmp_path):
+    from .tm_fixtures import render_catalog_pdf, render_mileage_pdf, render_reefer_pdf
+    h = _register("pekin@example.test", "Pekin buyer")
+    cat, mil, ref = tmp_path / "10-15-26-Pekin-Catalog.pdf", tmp_path / "2026062PekinMileageSheet.pdf", tmp_path / "2026062PekinReeferHr.pdf"
+    render_catalog_pdf(cat), render_mileage_pdf(mil), render_reefer_pdf(ref)
+    up = lambda path, kind, data=None: client.post(f"/api/ingest/{kind}", headers=h, data=data or {},
+                                                   files={"file": (path.name, path.read_bytes(), "application/pdf")})
+
+    # sheets first (no catalog yet) — dropped in the WRONG box: still detected and stored
+    r = up(mil, "catalog", {"sale_id": "2026062"})
+    assert r.status_code == 200, r.text
+    assert r.json()["kind"] == "mileage" and "note" in r.json() and r.json()["matched"] == 0
+    # catalog has no sale number in its name: linked to the sheets by date + location, and takes the official id
+    r = up(cat, "mileage")
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["kind"] == "catalog" and j["created"] == 9 and j["sale_id"] == "2026062" and j["readings_applied"] >= 3
+    r = up(ref, "mileage")
+    assert r.json()["kind"] == "reefer" and r.json()["matched"] == 3
+
+    lots = {t["lot_no"]: t for t in client.get("/api/targets?sale_id=2026062", headers=h).json()}
+    assert lots["2"]["miles"] == 270_000 and lots["2"]["sale_date"] == "2026-10-15"
+    assert lots["M-4"]["miles"] == 194_000
+    assert lots["T-29"]["hours"] == 18189 and lots["T-29"]["hours_metric"] == "sheet"
+    assert lots["T-30"]["non_operable"] is True
+    sheet = client.get("/api/bidsheet?sale_id=2026062", headers=h).json()["rows"]
+    assert len(sheet) == 9 and all("ok" in r for r in sheet)
+
+
+def test_catalog_without_sheets_gets_placeholder_then_official_id(tmp_path):
+    from .tm_fixtures import render_catalog_pdf, render_mileage_pdf
+    h = _register("pekin2@example.test", "Pekin buyer 2")
+    cat, mil = tmp_path / "catalog.pdf", tmp_path / "2026062PekinMileageSheet.pdf"
+    render_catalog_pdf(cat), render_mileage_pdf(mil)
+    r = client.post("/api/ingest/auto", headers=h, files={"file": (cat.name, cat.read_bytes(), "application/pdf")}).json()
+    assert r["sale_id"] in ("PEKIN-20261015", "2026062")   # 2026062 if another tenant already created that sale
+    r = client.post("/api/ingest/auto", headers=h, data={"sale_id": "2026062"},
+                    files={"file": (mil.name, mil.read_bytes(), "application/pdf")}).json()
+    assert r["matched"] >= 3 and r["sale_id"] == "2026062"
+    assert {t["sale_id"] for t in client.get("/api/targets", headers=h).json()} == {"2026062"}

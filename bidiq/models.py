@@ -194,6 +194,32 @@ class Outcome(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
+class LotReading(Base):
+    """Pre-sale meter readings from T&M mileage / reefer-hour sheets (spec §5.3).
+
+    Stored on their own so upload order doesn't matter: they are linked to target lots by
+    sale date + location (sheets and catalogs rarely share a typed sale id), or by sale id.
+    """
+
+    __tablename__ = "lot_readings"
+    __table_args__ = (UniqueConstraint("tenant_id", "sale_date", "location_key", "lot_no", name="uq_reading"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    sale_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    sale_date: Mapped[date | None] = mapped_column(Date, index=True, nullable=True)
+    location_key: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    lot_no: Mapped[str] = mapped_column(String(20))
+    odometer_miles: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ecm_miles: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    meter_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reefer_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True)   # scratch | non_runner
+    tamper_flag: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source_file: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
+
+
 class IngestLog(Base):
     __tablename__ = "ingest_log"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

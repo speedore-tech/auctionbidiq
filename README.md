@@ -37,7 +37,7 @@ Tests: `python -m pytest`. Local Docker/Postgres: `docker compose up --build` (s
 |---|---|
 | §4 data model (class-aware, multi-tenant) | `bidiq/models.py` — `SoldComp`, `TargetLot`, `Sale`, `RetailFMV`, `Outcome`; `tenant_id NULL` = shared pool |
 | §5.1 result PDFs (coordinate bucketing, idempotent) | `bidiq/ingest/results_pdf.py`, `bidiq/ingest/__init__.py` |
-| §5.2 catalogs, §5.3 mileage / reefer hours (ODOM≠ECM flag) | `bidiq/ingest/sheets.py` |
+| §5.2 catalogs, §5.3 mileage / reefer hours (ODOM≠ECM, scratch, non-runner) | `bidiq/ingest/tm_formats.py` (real T&M PDF layouts, validated on the Pekin 10/15/2026 set), `bidiq/ingest/sheets.py` (CSV) |
 | §5.4 automation | `n8n/ingest_results_workflow.json`, `scripts/ingest_folder.py` |
 | §6 normalization (model groups, MD-box super-group, engine families + desirability) | `bidiq/normalize.py` |
 | §7 pricing: A cohort percentiles, B OLS, C retail-minus, blend + confidence | `bidiq/pricing/engine.py` |
@@ -66,7 +66,7 @@ are flagged and lean on retail-minus. Confidence (High/Med/Low) is reported sepa
 ## Known gaps / decisions to confirm
 - **Parser validated only on generated PDFs.** The x-ranges follow the spec; run your 9 real result files
   through `scripts/ingest_folder.py` and check the ingest log for "unparsed lines".
-- **Catalog PDF parsing is heuristic** (regex over text); CSV catalogs are exact. Mileage/hours PDFs must be tables with a header row containing "lot".
+- **Pre-sale documents:** T&M catalogs, mileage sheets and reefer-hour sheets are parsed from their real layouts and linked by sale date + location, in any upload order. Other auction houses' layouts would need their own parser.
 - **Frontend is dependency-free JS** (no React build step); the live bid card is a phone-friendly web page, not React Native.
 - **Tenant isolation is enforced in the app layer**, not Postgres row-level security. No pgvector similar-comp search yet.
 - **Assumed defaults** (all editable in Settings): transport $1.75/mi driveaway, $2.75/mi haul, $150 title/doc, blind-buy reserves (DPF/DEF $3.5k, transmission $4k, liftgate $2.5k, reefer unit $5k, tires/brakes $1.5k), auction discount 55/62/70% of retail.

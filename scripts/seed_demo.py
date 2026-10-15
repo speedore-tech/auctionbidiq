@@ -129,7 +129,7 @@ def main() -> None:
         ("FRTL_M2_106", 2022, 2023, 0, 100_000, "private", 88000),
         ("INTL_MV607", 2020, 2022, 50_000, 200_000, "private", 74000),
         ("INTL_LT625", 2019, 2021, 300_000, 600_000, "private", 55000),
-        ("UTIL_3000R", 2017, 2019, None, None, "private", 42000),
+        ("UTIL_REEFER", 2017, 2019, None, None, "private", 42000),
     ]
     for mg, y0, y1, m0, m1, tier, price in fmv:
         db.add(RetailFMV(tenant_id=tid, region="DFW / TX", model_group=mg, year_lo=y0, year_hi=y1, miles_lo=m0,

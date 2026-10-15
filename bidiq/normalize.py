@@ -25,7 +25,9 @@ MAKE_MAP = {
     "VANG": "VANGUARD", "VANGUARD": "VANGUARD", "CIMC": "VANGUARD",
 }
 
-TRAILER_MAKES = {"UTIL", "GDAN", "WABASH", "HYUNDAI", "STOUGHTON", "VANGUARD"}
+TRAILER_MAKES = {"UTIL", "GDAN", "WABASH", "HYUNDAI", "STOUGHTON", "VANGUARD", "KENTUCKY", "FRUEHAUF",
+                 "DORSEY", "POLAR", "FONTAINE", "REITNOUER", "TRANSCRAFT", "HEIL", "WILSON", "BENSON",
+                 "EXTREME", "PITTS", "BRENNER", "TREMCAR", "TRAIL", "MANAC", "TRAILMOBILE", "LANDOLL"}
 
 # (make, regex on model_raw, model_group). Ordered: first match wins.
 # NOTE: "M2 106" and "M2 106 BUSINESS CLAS" are the SAME group (Business Class is the
@@ -48,7 +50,7 @@ MODEL_RULES: list[tuple[str, str, str]] = [
     ("KENW", r"\bT\s*-?\s*680\b", "KENW_T680"),
     ("KENW", r"\bT\s*-?\s*270\b", "KENW_T270"),
     ("KENW", r"\bT\s*-?\s*370\b", "KENW_T370"),
-    ("KENW", r"\bW\s*-?\s*900\b", "KENW_W900"),
+    ("KENW", r"\bW\s*-?\s*900[A-Z]?\b", "KENW_W900"),
     ("PETE", r"\b579\b", "PETE_579"),
     ("PETE", r"\b389\b", "PETE_389"),
     ("PETE", r"\b337\b", "PETE_337"),
@@ -59,11 +61,6 @@ MODEL_RULES: list[tuple[str, str, str]] = [
     ("ISUZU", r"\bNRR\b|\bFTR\b", "ISUZU_NRR_FTR"),
     ("MACK", r"ANTHEM", "MACK_ANTHEM"),
     ("MACK", r"PINNACLE|\bCXU\b", "MACK_PINNACLE"),
-    ("UTIL", r"3000\s*R|REEF|VS2RA", "UTIL_3000R"),
-    ("GDAN", r"EVEREST|REEF|7311", "GDAN_EVEREST"),
-    ("WABASH", r"REEF|ARCTIC|DURAPLATE\s*REEF", "WABASH_REEFER"),
-    ("HYUNDAI", r"REEF|INNOCOOL", "HYUNDAI_REEFER"),
-    ("VANGUARD", r"REEF|COOL", "VANGUARD_REEFER"),
 ]
 
 # Medium-duty box super-group: direct cross-shopping alternatives (spec §6).
@@ -75,7 +72,6 @@ SUPER_GROUPS = {
     "INTL_LT625": "SLEEPER_TRACTOR", "INTL_LT": "SLEEPER_TRACTOR", "FRTL_CASCADIA": "SLEEPER_TRACTOR",
     "VOLVO_VNL": "SLEEPER_TRACTOR", "KENW_T680": "SLEEPER_TRACTOR", "PETE_579": "SLEEPER_TRACTOR",
     "INTL_PROSTAR": "SLEEPER_TRACTOR", "MACK_ANTHEM": "SLEEPER_TRACTOR", "FRTL_COLUMBIA": "SLEEPER_TRACTOR",
-    "UTIL_3000R": "REEFER_53", "GDAN_EVEREST": "REEFER_53", "WABASH_REEFER": "REEFER_53",
     "HYUNDAI_REEFER": "REEFER_53", "VANGUARD_REEFER": "REEFER_53",
 }
 
@@ -97,8 +93,14 @@ ENGINE_RULES: list[tuple[str, str, float]] = [
     (r"\bMX\s*-?\s*11\b", "PACCAR_MX11", 0.75),
     (r"PACCAR\s*PX\s*-?\s*9|\bPX\s*-?\s*9\b", "PACCAR_PX9", 0.85),
     (r"PACCAR\s*PX\s*-?\s*7|\bPX\s*-?\s*7\b", "PACCAR_PX7", 0.85),
-    (r"\bD\s*-?\s*13\b", "VOLVO_D13", 0.8),
+    (r"\bD\s*-?\s*13(?:TC)?\b", "VOLVO_D13", 0.8),
+    (r"\bD\s*-?\s*11\b", "VOLVO_D11", 0.7),
     (r"\bMP\s*-?\s*8\b", "MACK_MP8", 0.75),
+    (r"\bMP\s*-?\s*7\b", "MACK_MP7", 0.65),
+    (r"\bISM\b|\bM11\b", "CUMMINS_ISM", 0.6),
+    (r"\bN\s*-?\s*14\b", "CUMMINS_N14", 0.55),
+    (r"CATERPILLAR|\bCAT\b|\bC1[35]\b|\b3406", "CAT_HEAVY", 0.6),
+    (r"SERIES\s*60|\b12\.7\s*LITER", "DETROIT_S60", 0.6),
     (r"HINO\s*J0?8|\bJ08\b", "HINO_J08", 0.7),
     (r"\b4HK1\b", "ISUZU_4HK1", 0.7),
     (r"THERMO\s*KING|\bTK\b|PRECEDENT|\bS-?\d{3}\b", "REEFER_TK", 0.9),
@@ -133,11 +135,40 @@ def norm_make(raw: str | None) -> str | None:
     return MAKE_MAP.get(s, MAKE_MAP.get(s1, s1))
 
 
-def model_group(make: str | None, model_raw: str | None) -> str | None:
+TRAILER_TYPES: list[tuple[str, str]] = [
+    (r"REEF|REFRIG|MULTI-?TEMP|3000\s*R|EVEREST|ARCTIC|INNOCOOL|COOL\s*GLOBE", "REEFER"),
+    (r"FLAT\s*BED|FLATBED|\bFLAT\b", "FLATBED"),
+    (r"DROP\s*DECK|STEP\s*DECK|DOUBLE\s*DROP|LOWBOY|RGN", "DROPDECK"),
+    (r"TANK|BARREL|GALLON", "TANKER"),
+    (r"DUMP|END\s*DUMP|BELLY|HOPPER|GRAIN", "DUMP_HOPPER"),
+    (r"CAR\s*(?:HAULER|CARRIER)|AUTO", "CARHAULER"),
+    (r"CHASSIS|CONTAINER", "CHASSIS"),
+    (r"VAN|DURAPLATE|PLATE|4000\s*D|SHEET|ALUMINUM", "DRYVAN"),
+]
+
+
+def trailer_type(*texts: str | None) -> str:
+    t = " ".join(clean(x) for x in texts if x)
+    for rx, kind in TRAILER_TYPES:
+        if re.search(rx, t):
+            return kind
+    return "OTHER"
+
+
+def is_trailer(make: str | None, *hints: str | None) -> bool:
+    mk = norm_make(make)
+    h = " ".join(clean(x) for x in hints if x)
+    return mk in TRAILER_MAKES or bool(re.search(r"\bTRL\b|TRAILER", h))
+
+
+def model_group(make: str | None, model_raw: str | None, *hints: str | None) -> str | None:
+    """hints = class / description text; used to type trailers (reefer, dry van, flatbed…)."""
     mk = norm_make(make)
     m = clean(model_raw)
     if not mk and not m:
         return None
+    if is_trailer(make, *hints):
+        return f"{mk or 'UNK'}_{trailer_type(model_raw, *hints)}"
     for rule_make, rx, grp in MODEL_RULES:
         if mk == rule_make and re.search(rx, m):
             return grp
@@ -146,13 +177,17 @@ def model_group(make: str | None, model_raw: str | None) -> str | None:
 
 
 def super_group(group: str | None) -> str | None:
+    if group and group.endswith("_REEFER"):
+        return "REEFER_53"
+    if group and group.endswith("_DRYVAN"):
+        return "DRYVAN_53"
     return SUPER_GROUPS.get(group or "")
 
 
 # Super-groups the pricing engine may widen into when a model's own cohort is thin.
 # MD_BOX is spec'd (M2 106 / MV607 / 4300 are direct alternatives); 53' reefers are
 # near-commodity across brands. Tractors are NOT cross-shopped (brand/engine price apart).
-CROSS_SHOP = {"MD_BOX", "REEFER_53"}
+CROSS_SHOP = {"MD_BOX", "REEFER_53", "DRYVAN_53"}
 
 
 def cross_shop_group(group: str | None) -> str | None:
@@ -224,7 +259,9 @@ def enrich(rec: dict) -> dict:
     """Fill normalized + computed fields on a dict of raw spec fields (in place)."""
     rec["make"] = norm_make(rec.get("make")) or rec.get("make")
     if not rec.get("model_group"):
-        rec["model_group"] = model_group(rec.get("make"), rec.get("model_raw"))
+        rec["model_group"] = model_group(rec.get("make"), rec.get("model_raw"), rec.get("class_raw"),
+                                         rec.get("desc_raw"), rec.get("body_class") if rec.get("body_class") in
+                                         ("REEFER_TRAILER", "DRY_VAN_TRAILER") else None)
     rec["super_group"] = super_group(rec.get("model_group"))
     if rec.get("engine_raw") and not rec.get("engine_family"):
         rec["engine_family"] = engine_family(rec["engine_raw"])

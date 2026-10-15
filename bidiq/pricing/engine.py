@@ -208,7 +208,9 @@ def build_cohort(spec: dict, comps: list[dict], min_n: int) -> dict:
         elif scope == "mixed_engine":
             if c.get("model_group") != spec.get("model_group"):
                 return False
-        if bc == "REEFER_TRAILER" and spec.get("door_type") and c.get("door_type") and c["door_type"] != spec["door_type"]:
+        # door type (swing vs rollup) only narrows the tight bands; it must never empty the cohort
+        if (bc == "REEFER_TRAILER" and scope == "exact" and yb is not None and yb <= 2 and spec.get("door_type")
+                and c.get("door_type") and c["door_type"] != spec["door_type"]):
             return False
         if yb is not None and year and c.get("year") and abs(int(c["year"]) - int(year)) > yb:
             return False

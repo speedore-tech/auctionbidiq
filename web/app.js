@@ -326,16 +326,21 @@ async function viewTargets(app, _arg, params) {
       <a class="btn" href="#/price">+ Add via Quick price</a>
       <a class="btn" href="#/bidsheet${saleId ? "?sale_id=" + encodeURIComponent(saleId) : ""}">Printable bid sheet</a>
       <button id="csv">Export CSV</button></div></div>
-    <details class="panel" id="catPanel"${sheet.rows.length ? "" : " open"}><summary><b>Import upcoming lots from catalog files</b> <span class="muted small">— several PDFs/CSVs at once</span></summary>
-      <form id="tc" style="margin-top:8px">${uploaderHtml("catalog PDFs / CSVs")}
-        <div class="grid g3"><div><label>Sale ID <span class="muted">(blank = read from each filename)</span></label><input name="sale_id" value="${esc(saleId)}" placeholder="e.g. 2026101"></div>
+    <details class="panel" id="catPanel"${sheet.rows.length ? "" : " open"}><summary><b>Import an upcoming sale</b> <span class="muted small">— drop the catalog plus its mileage &amp; reefer-hour sheets</span></summary>
+      <form id="tc" style="margin-top:8px">${uploaderHtml("catalog + mileage/reefer sheets")}
+        <div class="grid g3"><div><label>Sale ID <span class="muted">(optional)</span></label><input name="sale_id" value="${esc(saleId)}" placeholder="e.g. 2026062"></div>
         <div><label>Sale date</label><input type="date" name="sale_date"></div><div><label>Location</label><input name="location"></div></div>
         <p><button class="primary">Import catalogs</button></p></form></details>
+    ${targetsSummary(sheet.rows)}
     ${saleId ? `<div id="saleEdit"></div>` : ""}
-    <div class="panel"><div class="table-wrap"><table>
+    <div class="panel"><div class="row" style="margin-bottom:8px">
+      <input id="tq" placeholder="Filter: lot, make, model, engine…" style="max-width:280px">
+      <select id="tf" style="width:auto"><option value="">All lots</option><option value="priced">Priced</option><option value="unpriced">No price yet</option><option value="live" selected>Hide scratched</option></select>
+      <span class="spacer"></span><span class="muted small" id="tcount"></span></div>
+      <div class="table-wrap"><table id="ttable">
       <tr><th>Sale</th><th>Lot</th><th>Unit</th><th class="num">Miles/Hrs</th><th>CDL</th><th class="num">N</th><th>Conf.</th>
         <th class="num">Target</th><th class="num">Walk</th><th class="num">Ceiling</th><th class="num">Ceiling all-in</th><th class="num">Win@target</th><th class="num">Equity@target</th><th>Flags</th><th>Status</th><th></th></tr>
-      ${sheet.rows.map((r) => `<tr>
+      ${sortLots(sheet.rows).map((r) => `<tr data-ok="${r.ok ? 1 : 0}" data-st="${esc(r.status || "")}" data-q="${esc([r.lot_no, r.year, r.make, r.model_raw, r.model_group, r.engine_family, r.body_class].join(" ").toLowerCase())}">
         <td>${esc(r.sale_id || "")}</td><td><b>${esc(r.lot_no || "")}</b></td>
         <td><a href="#/target/${r.id}">${esc(r.year || "")} ${esc(r.make || "")} ${esc(r.model_raw || r.model_group || "")}</a><div class="small muted">${esc(r.model_group || "")} · ${esc(r.engine_family || "")}</div></td>
         <td class="num">${r.miles != null ? num(r.miles) : r.hours != null ? num(r.hours) + " h" : "—"}</td>
@@ -343,19 +348,69 @@ async function viewTargets(app, _arg, params) {
         ${r.ok ? `<td class="num">${r.n}</td><td><span class="chip conf-${r.confidence}">${r.confidence}</span></td>
         <td class="num">${money(r.hammer.target)}</td><td class="num">${money(r.hammer.walk_away)}</td><td class="num"><b>${money(r.hammer.hard_ceiling)}</b></td>
         <td class="num">${money(r.all_in.hard_ceiling)}</td><td class="num">${pct(r.win_prob.target)}</td>
-        <td class="num">${r.equity_target ? money(r.equity_target.dollars) : "—"}</td>` : `<td colspan="8" class="small muted">${esc(r.error)}</td>`}
+        <td class="num">${r.equity_target ? money(r.equity_target.dollars) : "—"}</td>` : `<td colspan="8" class="small muted">${esc(shortError(r))}</td>`}
         <td>${r.flags.map((f) => `<span class="chip">${esc(f)}</span>`).join("")}</td>
-        <td>${esc(r.status || "")}</td>
+        <td>${r.status === "scratched" ? '<span class="chip high">scratched</span>' : esc(r.status || "")}</td>
         <td class="small"><a href="#/live/${r.id}">live</a></td></tr>`).join("") || '<tr><td colspan="16" class="muted">No target lots. Ingest a catalog (Ingest page) or save one from Quick price.</td></tr>'}
     </table></div></div>`;
+  const applyFilter = () => {
+    const q = $("#tq").value.trim().toLowerCase(), f = $("#tf").value;
+    let shown = 0;
+    $$("#ttable tr[data-q]").forEach((tr) => {
+      const ok = (!q || tr.dataset.q.includes(q)) && (f !== "priced" || tr.dataset.ok === "1") &&
+        (f !== "unpriced" || tr.dataset.ok === "0") && (f !== "live" || tr.dataset.st !== "scratched");
+      tr.hidden = !ok; shown += ok;
+    });
+    $("#tcount").textContent = `${shown} of ${sheet.rows.length} lots`;
+  };
+  $("#tq").oninput = debounce(applyFilter, 150);
+  $("#tf").onchange = applyFilter;
+  applyFilter();
   $("#saleSel").onchange = (e) => location.hash = "#/targets" + (e.target.value ? "?sale_id=" + encodeURIComponent(e.target.value) : "");
   $("#csv").onclick = () => downloadAuthed("/bidsheet.csv" + (saleId ? "?sale_id=" + encodeURIComponent(saleId) : ""), `bidsheet_${saleId || "all"}.csv`);
-  bindUploader($("#tc"), "/ingest/catalog", { prepare: catalogPrepare, done: catalogDone, after: () => setTimeout(router, 1500) });
+  bindUploader($("#tc"), "/ingest/auto", { prepare: catalogPrepare, done: catalogDone, after: () => setTimeout(router, 1500) });
   if (saleId) renderSaleEditor($("#saleEdit"), sales.find((s) => s.sale_id === saleId) || { sale_id: saleId });
 }
 
+// natural lot order: 1, 2, … 329, then M-1…, P-…, T-1, T-2 …
+function lotKey(lot) {
+  const m = String(lot || "").match(/^([A-Z]*)-?(\d+)([A-Z]?)$/);
+  return m ? [m[1], Number(m[2]), m[3]] : ["~", 0, String(lot || "")];
+}
+function sortLots(rows) {
+  return [...rows].sort((a, b) => {
+    if ((a.sale_id || "") !== (b.sale_id || "")) return (a.sale_id || "") < (b.sale_id || "") ? -1 : 1;
+    const x = lotKey(a.lot_no), y = lotKey(b.lot_no);
+    return x[0] !== y[0] ? (x[0] < y[0] ? -1 : 1) : x[1] !== y[1] ? x[1] - y[1] : (x[2] < y[2] ? -1 : x[2] > y[2] ? 1 : 0);
+  });
+}
+function shortError(r) {
+  return /No comps/i.test(r.error || "") ? `No sold history for ${r.model_group || "this model"} yet — load result sheets or a retail price` : r.error;
+}
+
+function targetsSummary(rows) {
+  if (!rows.length) return "";
+  const live = rows.filter((r) => r.status !== "scratched");
+  const priced = live.filter((r) => r.ok);
+  const conf = { High: 0, Med: 0, Low: 0 };
+  priced.forEach((r) => { conf[r.confidence] = (conf[r.confidence] || 0) + 1; });
+  const missing = {};
+  live.filter((r) => !r.ok).forEach((r) => { const k = `${r.model_group || "?"}|${r.body_class || ""}`; missing[k] = (missing[k] || 0) + 1; });
+  const top = Object.entries(missing).sort((a, b) => b[1] - a[1]);
+  return `<div class="panel"><div class="grid g4">
+      <div><div class="kpi">${live.length}</div><div class="kpi-label">Lots in play (${rows.length - live.length} scratched)</div></div>
+      <div><div class="kpi">${priced.length}</div><div class="kpi-label">Priced from sold comps / retail</div></div>
+      <div><div class="kpi">${conf.High} · ${conf.Med} · ${conf.Low}</div><div class="kpi-label">Confidence High · Med · Low</div></div>
+      <div><div class="kpi">${live.length - priced.length}</div><div class="kpi-label">No price yet — need sold history</div></div></div>
+    ${top.length ? `<details style="margin-top:8px"${priced.length ? "" : " open"}><summary>Which models need sold history (${top.length})</summary>
+      <p class="small muted">Prices come from past auction results for the same model. Upload T&amp;M result sheets that include these models
+      on the <a href="#/ingest">Ingest</a> page (or add a retail price on <a href="#/fmv">Retail FMV</a>), and every lot reprices automatically.</p>
+      <div class="row">${top.slice(0, 40).map(([k, n]) => { const [g, b] = k.split("|"); return `<span class="chip" title="${esc(b)}">${esc(g)} × ${n}</span>`; }).join("")}</div></details>` : ""}
+  </div>`;
+}
+
 function renderSaleEditor(el, s) {
-  el.innerHTML = `<form class="panel" id="saleForm"><h2>Sale terms — ${esc(s.sale_id)}</h2><div class="grid g4">
+  el.innerHTML = `<details class="panel"><summary><b>Sale terms — ${esc(s.sale_id)}</b> <span class="muted small">buyer's premium ${s.buyers_premium_pct != null ? esc(s.buyers_premium_pct) + "%" : "default"}, deposit, wire deadline</span></summary><form id="saleForm" style="margin-top:8px"><div class="grid g4">
     <div><label>Sale date</label><input type="date" name="sale_date" value="${esc(s.sale_date || "")}"></div>
     <div><label>Location</label><input name="location" value="${esc(s.location || "")}"></div>
     <div><label>Buyer's premium % (this sale)</label><input type="number" step="0.5" name="buyers_premium_pct" value="${esc(s.buyers_premium_pct ?? "")}"></div>
@@ -364,7 +419,7 @@ function renderSaleEditor(el, s) {
     <div><label>Payment window (h)</label><input type="number" name="payment_window_hours" value="${esc(s.payment_window_hours ?? "")}"></div>
     <div><label><input type="checkbox" name="absolute" ${s.absolute !== false ? "checked" : ""}> Absolute / no arbitration</label></div>
     <div><label>Terms notes</label><input name="terms_notes" value="${esc(s.terms_notes || "")}"></div>
-    </div><p><button class="primary">Save sale terms</button> <span class="small muted">Premium varies per sale/lot — never hardcoded.</span></p></form>`;
+    </div><p><button class="primary">Save sale terms</button> <span class="small muted">Premium varies per sale/lot — never hardcoded.</span></p></form></details>`;
   $("#saleForm").onsubmit = async (e) => {
     e.preventDefault();
     const d = formData(e.target); d.sale_id = s.sale_id;
@@ -627,21 +682,35 @@ function bindUploader(form, path, opts) {
   render();
 }
 
-// One typed sale ID applies to every file; if blank, read it from each filename.
-function saleIdFor(file, form, many) {
-  const typed = (form.elements.sale_id.value || "").trim();
-  if (typed) return { sale_id: typed };
-  const guess = saleIdFromName(file.name);
-  if (guess) return { sale_id: guess };
-  return many ? "No sale ID in this filename — type a Sale ID above" : "Enter the Sale ID";
+// Sale ID is optional: a typed one applies to every file; else a sale number in the filename
+// (e.g. 2026062PekinMileageSheet.pdf); else the server matches documents by sale date + location.
+function saleFields(file, form) {
+  const typed = form.elements.sale_id ? (form.elements.sale_id.value || "").trim() : "";
+  const f = { sale_id: typed || saleIdFromName(file.name) || "" };
+  if (form.elements.sale_date) f.sale_date = form.elements.sale_date.value;
+  if (form.elements.location) f.location = form.elements.location.value;
+  return f;
 }
+const catalogPrepare = (file, form) => saleFields(file, form);
+const KIND_NAMES = { results: "Result sheet", catalog: "Catalog", mileage: "Mileage sheet", reefer: "Reefer-hour sheet" };
 
-function catalogPrepare(file, form, many) {
-  const sid = saleIdFor(file, form, many);
-  if (typeof sid === "string") return sid;
-  return { ...sid, sale_date: form.elements.sale_date.value, location: form.elements.location.value };
+// One summary line per uploaded file, whatever it turned out to be.
+function ingestDone(r) {
+  const what = KIND_NAMES[r.kind] || "File";
+  let msg;
+  if (r.kind === "catalog") {
+    msg = `${what} → sale ${r.sale_id}${r.location ? " · " + r.location : ""}${r.sale_date ? " · " + r.sale_date : ""}: ${r.created} new / ${r.updated} updated lots`
+      + (r.readings_applied ? `, mileage/hours applied to ${r.readings_applied}` : "");
+  } else if (r.kind === "mileage" || r.kind === "reefer") {
+    msg = `${what}: ${r.message || `${r.rows} readings, ${r.matched} matched`}`;
+  } else {
+    msg = r.sale_id
+      ? `${what} → sale ${r.sale_id} ${r.location || ""}: ${r.rows} sold lots (replaced ${r.replaced})${r.skipped_lines && r.skipped_lines.length ? `, ${r.skipped_lines.length} unparsed lines — see log` : ""}`
+      : `${what}: ${r.rows} comps across ${r.sales} sales`;
+  }
+  return (r.note ? r.note + " " : "") + msg;
 }
-const catalogDone = (r) => `Sale ${r.sale_id}: ${r.created} new / ${r.updated} updated target lots`;
+const catalogDone = ingestDone;
 
 // ------------------------------------------------------------------ ingest
 function ingestLogRows(log) {
@@ -650,25 +719,35 @@ function ingestLogRows(log) {
 
 async function viewIngest(app) {
   const log = await api("/ingest/log");
-  app.innerHTML = `<div class="grid g3">
+  app.innerHTML = `
+  <form class="panel" id="fa"><h2>Upcoming sale — drop all its files here</h2>
+    <p class="small muted">Catalog, mileage sheets and reefer-hour sheets together, in any order. Each file is recognised automatically and
+      they're linked to each other by the sale date and location printed on them. Every lot is then priced on the
+      <a href="#/targets">Targets</a> page. Past result sheets dropped here go to the comp pool.</p>
+    ${uploaderHtml("catalog + mileage + reefer-hour PDFs")}
+    <div class="grid g3"><div><label>Sale ID <span class="muted">(optional — e.g. 2026062)</span></label><input name="sale_id"></div>
+      <div><label>Sale date <span class="muted">(optional — read from the files)</span></label><input type="date" name="sale_date"></div>
+      <div><label>Location <span class="muted">(optional)</span></label><input name="location"></div></div>
+    <p class="row"><button class="primary">Upload all</button><span id="faGo"></span></p></form>
+  <div class="grid g3">
     <form class="panel" id="fr"><h2>Auction result sheets</h2>
-      <p class="small muted">T&amp;M "PRICE LISTING BY TYPE/LOT#" PDFs (coordinate-bucketed parse) or comps CSVs. Each sheet's header gives its sale; re-ingesting a sale replaces its rows.</p>
+      <p class="small muted">T&amp;M "PRICE LISTING BY TYPE/LOT#" PDFs or comps CSVs — the sold prices every bid is based on. Each sheet's header gives its sale; re-ingesting a sale replaces its rows.</p>
       ${uploaderHtml("result sheets")}
       <div id="ovr"><label>Sale ID override (single file, only if the header is missing)</label><input name="sale_id"></div>
       <label>Visibility</label><select name="visibility"><option value="shared">Shared comp pool</option><option value="private">Private to my workspace</option></select>
       <p><button class="primary">Ingest results</button></p>
       <details><summary>CSV columns</summary><div class="small mono">sale_id, sale_date, location, lot_no, lot_type, year, make, class, model, engine, desc, trans, miles, hours, hours_metric, door_type, branded, non_op, sold_price</div></details></form>
     <form class="panel" id="fc"><h2>Catalogs (upcoming sale)</h2>
-      <p class="small muted">Catalog PDFs (heuristic extraction — review each lot) or CSVs. Creates/updates target lots.</p>
+      <p class="small muted">T&amp;M catalog PDFs or CSVs. Creates/updates one target lot per lot number (matched groups included).</p>
       ${uploaderHtml("catalogs")}
-      <label>Sale ID <span class="muted">(blank = read from each filename)</span></label><input name="sale_id" placeholder="e.g. 2026101">
-      <div class="form-grid"><div><label>Sale date</label><input type="date" name="sale_date"></div><div><label>Location</label><input name="location"></div></div>
+      <label>Sale ID <span class="muted">(optional)</span></label><input name="sale_id" placeholder="e.g. 2026062">
+      <div class="form-grid"><div><label>Sale date <span class="muted">(optional)</span></label><input type="date" name="sale_date"></div><div><label>Location</label><input name="location"></div></div>
       <p><button class="primary">Ingest catalogs</button></p>
       <details><summary>CSV columns</summary><div class="small mono">lot_no, year, make, model, class, engine, desc, trans, miles, hours, hours_metric, vin, gvwr, front_axle, rear_axle, body_length, apu, sleeper_size, liftgate, door, engine_brake, notes</div></details></form>
-    <form class="panel" id="fm"><h2>Mileage / reefer-hours sheets</h2>
-      <p class="small muted">Joins on lot #. Flags ODOM vs ECM mismatch; records whether hours are Total, Engine or Electric (not comparable).</p>
+    <form class="panel" id="fm"><h2>Mileage / reefer-hour sheets</h2>
+      <p class="small muted">T&amp;M ODOM/ECM and reefer-hour sheets. Flags ODOM≠ECM (tamper), scratched lots and non-runners. Upload before or after the catalog.</p>
       ${uploaderHtml("sheets")}
-      <label>Sale ID <span class="muted">(blank = read from each filename)</span></label><input name="sale_id" placeholder="e.g. 2026101">
+      <label>Sale ID <span class="muted">(optional)</span></label><input name="sale_id" placeholder="e.g. 2026062">
       <p><button class="primary">Ingest sheets</button></p>
       <details><summary>CSV columns</summary><div class="small mono">lot, odometer (thousands ok), ecm_miles, total_hours, engine_hours, electric_hours</div></details></form>
   </div>
@@ -680,21 +759,24 @@ async function viewIngest(app) {
     const t = $("#logTable");
     t.innerHTML = t.rows[0].outerHTML + ingestLogRows(l);
   };
+  let lastSale = null;
+  bindUploader($("#fa"), "/ingest/auto", {
+    prepare: (file, form) => saleFields(file, form),
+    done: (r) => { if (r.kind !== "results" && r.sale_id) lastSale = r.sale_id; return ingestDone(r); },
+    after: () => {
+      refreshLog();
+      if (lastSale) $("#faGo").innerHTML = `<a class="btn" href="#/targets?sale_id=${encodeURIComponent(lastSale)}">See target prices for sale ${esc(lastSale)} →</a>`;
+    },
+  });
   bindUploader($("#fr"), "/ingest/results", {
     // an override would merge every file into one sale, so it only applies to a single file
     prepare: (file, form, many) => ({ visibility: form.elements.visibility.value, sale_id: many ? "" : form.elements.sale_id.value.trim() }),
-    done: (r) => r.sale_id
-      ? `Sale ${r.sale_id} ${r.location || ""}: ${r.rows} lots (replaced ${r.replaced})${r.skipped_lines && r.skipped_lines.length ? `, ${r.skipped_lines.length} unparsed lines — see log` : ""}`
-      : `${r.rows} comps across ${r.sales} sales`,
+    done: ingestDone,
     onCount: (n, form) => { $("#ovr", form).hidden = n > 1; },
     after: refreshLog,
   });
-  bindUploader($("#fc"), "/ingest/catalog", { prepare: catalogPrepare, done: catalogDone, after: refreshLog });
-  bindUploader($("#fm"), "/ingest/mileage", {
-    prepare: (file, form, many) => saleIdFor(file, form, many),
-    done: (r) => `Sale ${r.sale_id}: ${r.matched}/${r.rows} lots matched, ${r.tamper_flags} tamper flags`,
-    after: refreshLog,
-  });
+  bindUploader($("#fc"), "/ingest/catalog", { prepare: catalogPrepare, done: ingestDone, after: refreshLog });
+  bindUploader($("#fm"), "/ingest/mileage", { prepare: (file, form) => saleFields(file, form), done: ingestDone, after: refreshLog });
 }
 
 // ------------------------------------------------------------------ comps

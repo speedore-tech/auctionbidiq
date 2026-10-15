@@ -20,15 +20,17 @@ from ..config import ALLOW_REGISTRATION, BASE_DIR, DEFAULT_SETTINGS, UPLOAD_DIR,
 from ..db import get_db, init_db
 from ..fmv import TIERS, fmv_row_dict, validate_source
 from ..geo import LOCATIONS
-from ..ingest import TARGET_FIELDS, fit_lengths, ingest_catalog, ingest_comps_csv, ingest_mileage, ingest_results
+from ..ingest import TARGET_FIELDS, fit_lengths, ingest_catalog, ingest_comps_csv, ingest_readings, ingest_results
 from ..ingest.results_pdf import parse_results_pdf
-from ..ingest.sheets import (catalog_from_rows, parse_catalog_pdf, parse_mileage_rows, read_csv_rows,
-                             read_pdf_table_rows)
+from ..ingest.sheets import catalog_from_rows, parse_mileage_rows, read_csv_rows
+from ..ingest.tm_formats import (ParsedReadings, detect_csv_kind, detect_pdf_kind, parse_any_date,
+                                 parse_readings_pdf)
+from ..ingest.tm_formats import parse_catalog_pdf as parse_tm_catalog_pdf
 from ..models import IngestLog, Outcome, RetailFMV, Sale, SoldComp, TargetLot, Tenant, User
 from ..normalize import BODY_CLASSES, ENGINE_RULES, MODEL_RULES, SUPER_GROUPS, enrich
 from ..recommender import plan_multi_lot
 from ..risk import cdl_check, vin_check, warranty_check
-from ..services import (COMP_COLS, LOT_COLS, SALE_COLS, backtest, comp_scope, evaluate, load_comps, row_dict,
+from ..services import (COMP_COLS, LOT_COLS, SALE_COLS, PricingCache, backtest, comp_scope, evaluate, load_comps, row_dict,
                         summary_row)
 
 app = FastAPI(title="BidIQ — Auction Bid Intelligence", version="1.0.0")
@@ -298,45 +300,104 @@ def _visibility_tenant(ctx: Ctx, visibility: str) -> int | None:
     return ctx.tenant_id
 
 
+KIND_LABEL = {"results": "result sheet", "catalog": "catalog", "mileage": "mileage sheet", "reefer": "reefer-hour sheet"}
+
+
+def _detect_kind(data: bytes, name: str) -> str | None:
+    if name.lower().endswith(".csv"):
+        rows = read_csv_rows(data)
+        return detect_csv_kind(list(rows[0].keys()) if rows else [])
+    import pdfplumber
+
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        return detect_pdf_kind(pdf)
+
+
+def _ingest_file(ctx: Ctx, data: bytes, name: str, expected: str | None, *, visibility: str = "shared",
+                 sale_id: str | None = None, sale_date: str | None = None, location: str | None = None) -> dict:
+    """Detect what a T&M file is and ingest it accordingly — a file dropped in the wrong box still works."""
+    sale_id = (sale_id or "").strip() or None
+    location = (location or "").strip() or None
+    sd = parse_any_date(sale_date)
+    try:
+        kind = _detect_kind(data, name) or expected
+    except Exception:
+        raise HTTPException(422, "Couldn't open this file — is it a valid PDF or CSV?")
+    if not kind:
+        raise HTTPException(422, "Couldn't tell what this file is (result sheet, catalog, mileage or reefer-hour sheet).")
+    note = None
+    if expected and kind != expected and not (expected == "mileage" and kind == "reefer"):
+        note = f"This looks like a {KIND_LABEL[kind]}, not a {KIND_LABEL[expected]} — ingested it as a {KIND_LABEL[kind]}."
+    tol = float(ctx.settings.get("odom_ecm_tolerance_pct", 10))
+    try:
+        if kind == "results":
+            tid = _visibility_tenant(ctx, visibility)
+            if name.lower().endswith(".csv"):
+                res = ingest_comps_csv(ctx.db, read_csv_rows(data), tid, name)
+            else:
+                parsed = parse_results_pdf(io.BytesIO(data))
+                if not parsed.rows:
+                    raise HTTPException(422, "No lot rows found — is this a T&M 'PRICE LISTING BY TYPE/LOT#' sheet?")
+                # an override would merge files into one sale, so it's only honoured when the header lacks one
+                res = ingest_results(ctx.db, parsed, tid, name, sale_id_override=None if parsed.sale_id else sale_id)
+        elif kind == "catalog":
+            if name.lower().endswith(".csv"):
+                recs, cat_date, cat_loc = catalog_from_rows(read_csv_rows(data)), None, None
+            else:
+                cat = parse_tm_catalog_pdf(io.BytesIO(data))
+                recs, cat_date, cat_loc = cat.lots, cat.sale_date, cat.location
+            if not recs:
+                raise HTTPException(422, "No lots found in this catalog.")
+            res = ingest_catalog(ctx.db, recs, ctx.tenant_id, sale_id, name, sd or cat_date, location or cat_loc)
+        else:
+            if name.lower().endswith(".csv"):
+                parsed = ParsedReadings(kind="mileage", sale_date=sd, location=location,
+                                        rows=parse_mileage_rows(read_csv_rows(data), tol))
+            else:
+                parsed = parse_readings_pdf(io.BytesIO(data), tol)
+                parsed.sale_date = sd or parsed.sale_date
+                parsed.location = location or parsed.location
+            if not parsed.rows:
+                raise HTTPException(422, "No lot readings found on this sheet.")
+            res = ingest_readings(ctx.db, parsed, ctx.tenant_id, name, sale_id)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    res["kind"] = kind
+    if note:
+        res["note"] = note
+    return res
+
+
+@app.post("/api/ingest/auto")
+async def ingest_auto_ep(file: UploadFile = File(...), visibility: str = Form("shared"),
+                         sale_id: str | None = Form(None), sale_date: str | None = Form(None),
+                         location: str | None = Form(None), ctx: Ctx = Depends(current_ctx)):
+    data = await file.read()
+    return _ingest_file(ctx, data, _save_upload(file, data), None, visibility=visibility, sale_id=sale_id,
+                        sale_date=sale_date, location=location)
+
+
 @app.post("/api/ingest/results")
 async def ingest_results_ep(file: UploadFile = File(...), visibility: str = Form("shared"),
                             sale_id: str | None = Form(None), ctx: Ctx = Depends(current_ctx)):
     data = await file.read()
-    name = _save_upload(file, data)
-    tid = _visibility_tenant(ctx, visibility)
-    try:
-        if name.lower().endswith(".csv"):
-            return ingest_comps_csv(ctx.db, read_csv_rows(data), tid, name)
-        parsed = parse_results_pdf(io.BytesIO(data))
-        if not parsed.rows:
-            raise HTTPException(422, "No lot rows found — is this a T&M 'PRICE LISTING BY TYPE/LOT#' sheet?")
-        return ingest_results(ctx.db, parsed, tid, name, sale_id_override=sale_id or None)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
+    return _ingest_file(ctx, data, _save_upload(file, data), "results", visibility=visibility, sale_id=sale_id)
 
 
 @app.post("/api/ingest/catalog")
-async def ingest_catalog_ep(file: UploadFile = File(...), sale_id: str = Form(...),
+async def ingest_catalog_ep(file: UploadFile = File(...), sale_id: str | None = Form(None),
                             sale_date: str | None = Form(None), location: str | None = Form(None),
                             ctx: Ctx = Depends(current_ctx)):
     data = await file.read()
-    name = _save_upload(file, data)
-    recs = catalog_from_rows(read_csv_rows(data)) if name.lower().endswith(".csv") else parse_catalog_pdf(io.BytesIO(data))
-    if not recs:
-        raise HTTPException(422, "No lots found in catalog")
-    sd = date.fromisoformat(sale_date) if sale_date else None
-    return ingest_catalog(ctx.db, recs, ctx.tenant_id, sale_id, name, sd, location)
+    return _ingest_file(ctx, data, _save_upload(file, data), "catalog", sale_id=sale_id, sale_date=sale_date,
+                        location=location)
 
 
 @app.post("/api/ingest/mileage")
-async def ingest_mileage_ep(file: UploadFile = File(...), sale_id: str = Form(...), ctx: Ctx = Depends(current_ctx)):
+async def ingest_mileage_ep(file: UploadFile = File(...), sale_id: str | None = Form(None),
+                            sale_date: str | None = Form(None), ctx: Ctx = Depends(current_ctx)):
     data = await file.read()
-    name = _save_upload(file, data)
-    raw = read_csv_rows(data) if name.lower().endswith(".csv") else read_pdf_table_rows(io.BytesIO(data))
-    rows = parse_mileage_rows(raw, float(ctx.settings.get("odom_ecm_tolerance_pct", 10)))
-    if not rows:
-        raise HTTPException(422, "No lot rows found (need a 'lot' column)")
-    return ingest_mileage(ctx.db, rows, ctx.tenant_id, sale_id, name)
+    return _ingest_file(ctx, data, _save_upload(file, data), "mileage", sale_id=sale_id, sale_date=sale_date)
 
 
 @app.get("/api/ingest/log")
@@ -541,11 +602,11 @@ def _bidsheet_rows(ctx: Ctx, sale_id: str | None) -> list[dict]:
     st = select(TargetLot).where(TargetLot.tenant_id == ctx.tenant_id)
     if sale_id:
         st = st.where(TargetLot.sale_id == sale_id)
-    comps = load_comps(ctx.db, ctx.tenant_id, ctx.settings)
+    cache = PricingCache(ctx.db, ctx.tenant_id, ctx.settings)
     out = []
     for t in ctx.db.scalars(st.order_by(TargetLot.run_order, TargetLot.lot_no)):
         lot = row_dict(t, LOT_COLS)
-        ev = evaluate(ctx.db, ctx.tenant_id, ctx.settings, lot, comps=comps)
+        ev = evaluate(ctx.db, ctx.tenant_id, ctx.settings, lot, cache=cache)
         row = summary_row(lot, ev)
         row["checklist"] = t.checklist or {}
         row["deposit"] = ev["recommendation"].get("deposit")

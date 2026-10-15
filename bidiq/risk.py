@@ -204,6 +204,8 @@ def risk_flags(lot: dict, settings: dict, sale_absolute: bool = True) -> list[di
 
     if sale_absolute:
         add("ABSOLUTE_SALE", "info", "Absolute / as-is / no arbitration — surprises are unrecoverable.")
+    if lot.get("status") == "scratched":
+        add("SCRATCHED", "high", "Scratched — withdrawn from the sale per the auction's mileage/hour sheet.")
     if lot.get("branded_title"):
         add("BRANDED_TITLE", "high", "Branded title — different market; excluded from comp stats.")
     if lot.get("non_operable") or str(lot.get("lot_type") or "").upper() == "P":

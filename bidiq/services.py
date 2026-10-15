@@ -33,6 +33,40 @@ def load_comps(db: Session, tenant_id: int, settings: dict) -> list[dict]:
     return [row_dict(c, COMP_COLS) for c in db.scalars(select(SoldComp).where(comp_scope(tenant_id, settings)))]
 
 
+class PricingCache:
+    """Per-request cache for pricing many lots at once (a catalog can have 800+ lots).
+
+    Each lot only needs comps from its own model group and its cross-shop group, so comps are
+    indexed by both; retail FMV rows and sales are loaded once.
+    """
+
+    def __init__(self, db: Session, tenant_id: int, settings: dict):
+        from .fmv import fmv_row_dict
+        from .models import RetailFMV
+        from .normalize import cross_shop_group
+
+        self._xg = cross_shop_group
+        self.by_group: dict[str, list[dict]] = {}
+        self.by_cross: dict[str, list[dict]] = {}
+        for c in load_comps(db, tenant_id, settings):
+            self.by_group.setdefault(c.get("model_group") or "", []).append(c)
+            xg = cross_shop_group(c.get("model_group"))
+            if xg:
+                self.by_cross.setdefault(xg, []).append(c)
+        self.fmv: dict[str, list[dict]] = {}
+        for r in db.scalars(select(RetailFMV).where(RetailFMV.tenant_id == tenant_id)):
+            self.fmv.setdefault(r.model_group, []).append(fmv_row_dict(r))
+        self.sales = {s.sale_id: row_dict(s, SALE_COLS) for s in db.scalars(select(Sale))}
+
+    def comps_for(self, spec: dict) -> list[dict]:
+        own = self.by_group.get(spec.get("model_group") or "", [])
+        xg = self._xg(spec.get("model_group"))
+        if not xg:
+            return own
+        seen = {id(c) for c in own}
+        return own + [c for c in self.by_cross.get(xg, []) if id(c) not in seen]
+
+
 def sale_dict(db: Session, sale_id: str | None) -> dict | None:
     if not sale_id:
         return None
@@ -63,7 +97,7 @@ def normalize_spec(spec: dict) -> dict:
 
 
 def evaluate(db: Session, tenant_id: int, settings: dict, lot: dict, overrides: dict | None = None,
-             comps: list[dict] | None = None) -> dict:
+             comps: list[dict] | None = None, cache: PricingCache | None = None) -> dict:
     """Full recommendation for one lot (TargetLot dict or ad-hoc spec)."""
     overrides = dict(overrides or {})
     lot = dict(lot)
@@ -71,7 +105,7 @@ def evaluate(db: Session, tenant_id: int, settings: dict, lot: dict, overrides: 
         lot["miles"] = int(float(overrides["miles"]))
     if overrides.get("hours") not in (None, ""):
         lot["hours"] = float(overrides["hours"])
-    sale = sale_dict(db, lot.get("sale_id"))
+    sale = cache.sales.get(lot.get("sale_id")) if cache else sale_dict(db, lot.get("sale_id"))
     if sale and not lot.get("sale_date"):
         lot["sale_date"] = sale.get("sale_date")
     if sale and not lot.get("location"):
@@ -80,14 +114,23 @@ def evaluate(db: Session, tenant_id: int, settings: dict, lot: dict, overrides: 
     for k in ("model_group", "super_group", "body_class", "engine_family", "transmission", "make"):
         if spec.get(k) and not lot.get(k):
             lot[k] = spec[k]
-    comps = comps if comps is not None else load_comps(db, tenant_id, settings)
-    fmv = fmv_provider(db, tenant_id, spec, settings, override=lot.get("retail_override"))
+    if cache is not None:
+        comps = cache.comps_for(spec)
+    elif comps is None:
+        comps = load_comps(db, tenant_id, settings)
+    fmv = fmv_provider(db, tenant_id, spec, settings, override=lot.get("retail_override"),
+                       rows=cache.fmv.get(spec.get("model_group"), []) if cache else None)
     pred = predict(spec, comps, settings, fmv)
     rec = recommend(pred, lot, settings, sale, fmv, overrides)
     sale_abs = sale.get("absolute", True) if sale else True
+    base_flags = risk_flags(lot, settings, sale_abs)
+    have = {f["code"] for f in base_flags}
+    if (lot.get("non_operable") or str(lot.get("lot_type") or "").upper() == "P") and rec.get("ok"):
+        rec["notes"].insert(0, "Non-runner: these prices are for a running unit — knock off your repair estimate "
+                               "before bidding.")
     risk = {
-        "flags": risk_flags(lot, settings, sale_abs) + [
-            {"code": f, "severity": "medium", "message": _flag_msg(f)} for f in pred.get("flags", [])],
+        "flags": base_flags + [{"code": f, "severity": "medium", "message": _flag_msg(f)}
+                               for f in pred.get("flags", []) if f not in have],
         "cdl": cdl_check(lot.get("gvwr"), lot.get("rear_axle_lbs"), spec.get("body_class"),
                          bool((lot.get("checklist") or {}).get("gvwr_confirmed"))),
         "vin": vin_check(lot.get("vin"), spec.get("year"), spec.get("make")) if lot.get("vin") else
@@ -132,7 +175,8 @@ def summary_row(lot: dict, ev: dict) -> dict:
         "body_length_ft": lot.get("body_length_ft"), "status": lot.get("status"),
         "cdl": ev["risk"]["cdl"]["message"], "cdl_required": ev["risk"]["cdl"].get("cdl_required"),
         "cdl_status": ev["risk"]["cdl"]["status"],
-        "flags": [f["code"] for f in ev["risk"]["flags"] if f["code"] != "ABSOLUTE_SALE"],
+        # ABSOLUTE_SALE / NO_VIN apply to nearly every T&M lot — keep them on the lot page, not the list
+        "flags": [f["code"] for f in ev["risk"]["flags"] if f["code"] not in ("ABSOLUTE_SALE", "NO_VIN")],
         "ok": rec.get("ok", False),
     }
     if rec.get("ok"):

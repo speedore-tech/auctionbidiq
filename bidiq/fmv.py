@@ -76,10 +76,13 @@ def summarize_fmv(rows: list[dict], spec: dict, settings: dict, today: date | No
             "asking_discount_pct": settings.get("asking_discount_pct", 10)}
 
 
-def fmv_provider(db: Session, tenant_id: int, spec: dict, settings: dict, override: float | None = None) -> dict | None:
+def fmv_provider(db: Session, tenant_id: int, spec: dict, settings: dict, override: float | None = None,
+                 rows: list[dict] | None = None) -> dict | None:
+    """rows: preloaded RetailFMV dicts for this model group (bid sheets price hundreds of lots)."""
     if override:
         return {"value": override, "tier": "manual override", "n": 1, "as_of": date.today().isoformat(),
                 "age_days": 0, "stale": False, "tiers": {}}
-    rows = [fmv_row_dict(r) for r in db.scalars(select(RetailFMV).where(
-        RetailFMV.tenant_id == tenant_id, RetailFMV.model_group == spec.get("model_group")))]
+    if rows is None:
+        rows = [fmv_row_dict(r) for r in db.scalars(select(RetailFMV).where(
+            RetailFMV.tenant_id == tenant_id, RetailFMV.model_group == spec.get("model_group")))]
     return summarize_fmv(rows, spec, settings)
