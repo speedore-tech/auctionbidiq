@@ -769,7 +769,24 @@ async function viewAnalysis(app, _arg, params) {
       ${mode === "day" ? `<select id="anSale" style="width:auto">${sales.map((s) => `<option value="${esc(s.sale_id)}" ${s.sale_id === saleId ? "selected" : ""}>${esc(s.sale_id)} · ${esc(s.sale_date || "")} · ${esc(s.location || "")} (${s.lots})</option>`).join("")}</select>` : ""}</div>
     <p class="small muted" style="margin:8px 0 0">Each lot is priced the way BidIQ would have priced it the morning of that sale — using <b>only earlier sales</b> —
       and compared with what it actually hammered for. <span class="chip good">Bargain</span> = below p25 · <span class="chip good">Below fair</span> = p25–fair ·
-      <span class="chip medium">Above fair</span> = fair–p75 · <span class="chip high">Premium</span> = above p75.</p></div>
+      <span class="chip medium">Above fair</span> = fair–p75 · <span class="chip high">Premium</span> = above p75.</p>
+    <details style="margin-top:8px"><summary>How to use this page</summary>
+      <div class="small" style="max-width:900px">
+        <p><b>Purpose:</b> learn from past auctions which kinds of units go cheap (good targets) and which get bid up (set a firm walk-away),
+          and check how close BidIQ's prices are to real hammers.</p>
+        <p><b>One auction day</b> — pick a past sale.
+          <br>• Top numbers: how much of the sale went below fair, how much was bid up, and total hammer vs total fair value.
+          <br>• <i>Patterns this day</i>: switch between Model / Type / Make / Engine / Age / Mileage. Top rows sold below fair most often.
+            <i>Median vs fair</i> is how far under (green, left) or over (red, right) fair value that group typically went.
+          <br>• <i>Every lot</i>: filter Below fair / Bargains / Above fair / Premium and by type. Keep <i>Hide low-confidence</i> on —
+            those prices had too little history to judge a lot by.</p>
+        <p><b>Patterns across all sales</b> — the same idea over every loaded sale. Left: kinds of units that most often sold below fair
+          (higher chance of buying well). Right: kinds most often bid up. Bottom: which yards run hot or cold.</p>
+        <p><b>Using it to bid:</b> a model that's "often cheap" → bid near your target and be patient; one that's "bid up" → expect to pay
+          your walk-away and don't chase past the ceiling. The <i>History</i> column on Targets shows this for each upcoming lot.</p>
+        <p><b>Read it with care:</b> one cheap lot can simply be a rough unit — trust patterns with more lots and more sales
+          (see the Lots / Sales columns), not single results.</p>
+      </div></details></div>
     <div id="anBody"><div class="panel muted">Analysing…</div></div>`;
   $$(".tabs button", app).forEach((b) => b.onclick = () => { location.hash = `#/analysis?view=${b.dataset.v}${saleId ? "&sale_id=" + encodeURIComponent(saleId) : ""}`; });
   if (!sales.length) { $("#anBody").innerHTML = '<div class="note">No result sheets loaded yet — upload past auction results on the Ingest page.</div>'; return; }

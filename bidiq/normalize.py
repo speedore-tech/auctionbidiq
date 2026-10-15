@@ -98,7 +98,7 @@ SUPER_GROUPS = {
 # (regex on engine_raw, engine_family, desirability weight 0..1)
 # Weight = serviceability / nationwide parts / resale desirability (spec §6).
 ENGINE_RULES: list[tuple[str, str, float]] = [
-    (r"\bX\s*-?\s*15\b|\bISX\s*15?\b", "CUMMINS_X15", 0.95),
+    (r"\bX\s*-?\s*15\b|\bISX(?:\s*15)?\b", "CUMMINS_X15", 0.95),
     (r"\bX\s*-?\s*12\b", "CUMMINS_X12", 0.8),
     (r"\bISL\b|\bL\s*-?\s*9\b|8\.9", "CUMMINS_L9", 0.9),
     (r"\bISB\b|\bB\s*-?\s*6\.7\b|6\.7|\bB67\b", "CUMMINS_B67", 1.0),
@@ -108,6 +108,7 @@ ENGINE_RULES: list[tuple[str, str, float]] = [
     (r"\bDD\s*-?\s*15\b", "DETROIT_DD15", 0.9),
     (r"\bA\s*-?\s*26\b", "NAVISTAR_A26", 0.6),
     (r"\bS13\b", "NAVISTAR_S13", 0.65),
+    (r"\bN\s*-?\s*13\b", "NAVISTAR_N13", 0.45),
     (r"MAXX\s*FORCE|MAXXFORCE|\bMF\s*\d", "NAVISTAR_MAXXFORCE", 0.3),
     (r"\bMX\s*-?\s*13\b", "PACCAR_MX13", 0.85),
     (r"\bMX\s*-?\s*11\b", "PACCAR_MX11", 0.75),
@@ -120,11 +121,12 @@ ENGINE_RULES: list[tuple[str, str, float]] = [
     (r"\bISM\b|\bM11\b", "CUMMINS_ISM", 0.6),
     (r"\bN\s*-?\s*14\b", "CUMMINS_N14", 0.55),
     (r"CATERPILLAR|\bCAT\b|\bC1[35]\b|\b3406", "CAT_HEAVY", 0.6),
-    (r"SERIES\s*60|\b12\.7\s*LITER", "DETROIT_S60", 0.6),
-    (r"HINO\s*J0?8|\bJ08\b", "HINO_J08", 0.7),
+    (r"SERIES\s*60|\b12\.7\s*LITER|DETROIT\s*14\.0|\b14\.0\s*LITER", "DETROIT_S60", 0.6),
+    (r"HINO\s*J0?8|\bJ0?8E?(?:-V8)?\b", "HINO_J08", 0.7),
     (r"\b4HK1\b", "ISUZU_4HK1", 0.7),
-    (r"THERMO\s*KING|\bTK\b|PRECEDENT|\bS-?\d{3}\b", "REEFER_TK", 0.9),
-    (r"CARRIER|\bX4\b|VECTOR", "REEFER_CARRIER", 0.85),
+    # reefer units: result sheets split "THERMO | KING" across columns and misspell "PRECENDENT"
+    (r"THERMO|\bKING\b|\bTK\b|PRECE?N?DENT|\bS-?\d{3}M?\b|\bSB-?\d{3}|\bSLX", "REEFER_TK", 0.9),
+    (r"CARRIER|\bX[24]\b|VECTOR|\bAPX\b|ULTRA\s*XTC|\b7[35]00\b", "REEFER_CARRIER", 0.85),
 ]
 ENGINE_WEIGHTS = {fam: w for _, fam, w in ENGINE_RULES}
 

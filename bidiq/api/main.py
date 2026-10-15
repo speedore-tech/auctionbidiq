@@ -40,6 +40,30 @@ app = FastAPI(title="BidIQ — Auction Bid Intelligence", version="1.0.0")
 def _startup():
     init_db()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    _refresh_engine_families()
+
+
+def _refresh_engine_families() -> None:
+    """Re-run engine matching on rows stored as unrecognised (OTHER:…) — picks up improved rules
+    (e.g. reefer units split across columns) without re-uploading every sheet."""
+    from ..db import SessionLocal
+    from ..normalize import TRAILER_CLASSES, clean, engine_family
+    db = SessionLocal()
+    try:
+        n = 0
+        for model in (SoldComp, TargetLot):
+            for r in db.scalars(select(model).where(model.engine_family.like("OTHER:%"))):
+                fam = engine_family(r.engine_raw)
+                if fam and fam.startswith("OTHER:") and (clean(r.class_raw) in TRAILER_CLASSES or
+                                                         str(r.lot_no or "").startswith("T-")):
+                    fam = None   # trailer description text that spilled into the engine column
+                if fam != r.engine_family:
+                    r.engine_family = fam
+                    n += 1
+        if n:
+            db.commit()
+    finally:
+        db.close()
 
 
 def _j(d: dict) -> dict:
