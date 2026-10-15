@@ -145,3 +145,47 @@ def test_catalog_without_sheets_gets_placeholder_then_official_id(tmp_path):
                     files={"file": (mil.name, mil.read_bytes(), "application/pdf")}).json()
     assert r["matched"] >= 3 and r["sale_id"] == "2026062"
     assert {t["sale_id"] for t in client.get("/api/targets", headers=h).json()} == {"2026062"}
+
+
+def test_duplicates_prevented_and_delete_reload(tmp_path):
+    from bidiq.services import load_comps
+    from bidiq.db import SessionLocal
+    from bidiq.config import merged_settings
+    from .tm_fixtures import render_catalog_pdf
+    import bidiq.auth as auth_mod
+    h = _register("dup@example.test", "Dup Co")
+    me = client.get("/api/auth/me", headers=h).json()
+    pdf = tmp_path / "res.pdf"
+    render(pdf, "SALE: 2026999 09/17/2026 HAMPTON", SAMPLE_ROWS)
+    up = lambda vis: client.post("/api/ingest/results", headers=h, data={"visibility": vis},
+                                 files={"file": ("res.pdf", pdf.read_bytes(), "application/pdf")})
+    assert up("shared").status_code == 200 and up("private").status_code == 200
+    db = SessionLocal()
+    mine = [c for c in load_comps(db, me["tenant_id"], merged_settings({})) if c["sale_id"] == "2026999"]
+    assert len(mine) == len(SAMPLE_ROWS)                      # loaded in both pools, counted once
+    summ = client.get("/api/data/summary", headers=h).json()
+    row = next(r for r in summ["comps"] if r["sale_id"] == "2026999")
+    assert row["duplicated"] and row["shared"] == row["private"] == len(SAMPLE_ROWS)
+
+    # catalog uploaded under two different typed ids -> one set of lots, not two
+    cat = tmp_path / "catalog.pdf"
+    render_catalog_pdf(cat)
+    send = lambda sid: client.post("/api/ingest/auto", headers=h, data={"sale_id": sid},
+                                   files={"file": ("catalog.pdf", cat.read_bytes(), "application/pdf")}).json()
+    assert send("20261015")["created"] == 9
+    second = send("2026062")
+    assert second["created"] == 0 and second["sale_id"] == "20261015"
+    assert len(client.get("/api/targets", headers=h).json()) == 9
+
+    # deleting shared comps needs the platform owner; private is fine for a workspace admin
+    assert client.delete("/api/data/comps?scope=shared&sale_id=2026999", headers=h).status_code == 403
+    assert client.delete("/api/data/comps?scope=private", headers=h).json()["deleted"] == len(SAMPLE_ROWS)
+    auth_mod.SUPERADMIN_EMAILS.add("dup@example.test")
+    try:
+        assert client.delete("/api/data/comps?scope=shared&sale_id=2026999", headers=h).json()["deleted"] == len(SAMPLE_ROWS)
+    finally:
+        auth_mod.SUPERADMIN_EMAILS.discard("dup@example.test")
+    assert not any(r["sale_id"] == "2026999" for r in client.get("/api/data/summary", headers=h).json()["comps"])
+    assert client.delete("/api/data/lots?sale_id=20261015", headers=h).json()["deleted"] == 9
+    assert client.get("/api/targets", headers=h).json() == []
+    assert up("shared").json()["rows"] == len(SAMPLE_ROWS)    # reload works after delete

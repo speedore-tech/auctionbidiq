@@ -23,10 +23,10 @@ from ..geo import LOCATIONS
 from ..ingest import TARGET_FIELDS, fit_lengths, ingest_catalog, ingest_comps_csv, ingest_readings, ingest_results
 from ..ingest.results_pdf import parse_results_pdf
 from ..ingest.sheets import catalog_from_rows, parse_mileage_rows, read_csv_rows
-from ..ingest.tm_formats import (ParsedReadings, detect_csv_kind, detect_pdf_kind, parse_any_date,
+from ..ingest.tm_formats import (ParsedReadings, detect_csv_kind, detect_pdf_kind, location_key, parse_any_date,
                                  parse_readings_pdf)
 from ..ingest.tm_formats import parse_catalog_pdf as parse_tm_catalog_pdf
-from ..models import IngestLog, Outcome, RetailFMV, Sale, SoldComp, TargetLot, Tenant, User
+from ..models import IngestLog, LotReading, Outcome, RetailFMV, Sale, SoldComp, TargetLot, Tenant, User
 from ..normalize import BODY_CLASSES, ENGINE_RULES, MODEL_RULES, SUPER_GROUPS, enrich
 from ..recommender import plan_multi_lot
 from ..risk import cdl_check, vin_check, warranty_check
@@ -259,7 +259,7 @@ def meta(ctx: Ctx = Depends(current_ctx)):
 def dashboard(ctx: Ctx = Depends(current_ctx)):
     db = ctx.db
     scope = comp_scope(ctx.tenant_id, ctx.settings)
-    n_comps = db.scalar(select(func.count()).select_from(SoldComp).where(scope))
+    n_comps = len(load_comps(db, ctx.tenant_id, ctx.settings))
     n_excl = db.scalar(select(func.count()).select_from(SoldComp).where(
         scope, or_(SoldComp.non_operable.is_(True), SoldComp.branded_title.is_(True))))
     coverage = db.execute(select(SoldComp.model_group, SoldComp.body_class, func.count(), func.min(SoldComp.year),
@@ -407,6 +407,95 @@ def ingest_log(ctx: Ctx = Depends(current_ctx)):
     return [{"id": r.id, "kind": r.kind, "filename": r.filename, "sale_id": r.sale_id, "rows": r.rows,
              "status": r.status, "message": r.message, "created_at": r.created_at.isoformat(),
              "shared": r.tenant_id is None} for r in rows]
+
+
+# ================================================================== manage data (delete & reload)
+@app.get("/api/data/summary")
+def data_summary(ctx: Ctx = Depends(current_ctx)):
+    """What's loaded, per sale: historical comps (shared / mine) and upcoming-sale lots."""
+    db = ctx.db
+    comps: dict[str, dict] = {}
+    for sid, sdate, loc, tid, n in db.execute(
+            select(SoldComp.sale_id, SoldComp.sale_date, SoldComp.location, SoldComp.tenant_id, func.count())
+            .where(comp_scope(ctx.tenant_id, ctx.settings))
+            .group_by(SoldComp.sale_id, SoldComp.sale_date, SoldComp.location, SoldComp.tenant_id)):
+        row = comps.setdefault(sid, {"sale_id": sid, "sale_date": sdate.isoformat() if sdate else None,
+                                     "location": loc, "shared": 0, "private": 0})
+        row["shared" if tid is None else "private"] += n
+    for r in comps.values():
+        r["duplicated"] = bool(r["shared"] and r["private"])
+    lots = [{"sale_id": sid, "sale_date": d.isoformat() if d else None, "location": loc, "lots": n}
+            for sid, d, loc, n in db.execute(
+                select(TargetLot.sale_id, TargetLot.sale_date, TargetLot.location, func.count())
+                .where(TargetLot.tenant_id == ctx.tenant_id)
+                .group_by(TargetLot.sale_id, TargetLot.sale_date, TargetLot.location))]
+    by_date: dict = {}
+    for l in lots:
+        by_date.setdefault((l["sale_date"], location_key(l["location"])), []).append(l["sale_id"])
+    for l in lots:
+        others = [s for s in by_date[(l["sale_date"], location_key(l["location"]))] if s != l["sale_id"]]
+        l["same_sale_as"] = others if l["sale_date"] else []
+    return {"comps": sorted(comps.values(), key=lambda r: r["sale_date"] or "", reverse=True),
+            "lots": sorted(lots, key=lambda r: r["sale_date"] or "", reverse=True),
+            "can_delete_shared": ctx.is_superadmin, "is_admin": ctx.is_admin}
+
+
+@app.delete("/api/data/comps")
+def delete_comps(scope: str, sale_id: str | None = None, ctx: Ctx = Depends(current_ctx)):
+    """scope: 'private' (my workspace's comps), 'shared' (everyone's pool — platform owner only) or 'all'."""
+    ctx.require_admin()
+    if scope not in ("private", "shared", "all"):
+        raise HTTPException(400, "scope must be private, shared or all")
+    if scope in ("shared", "all") and not ctx.is_superadmin:
+        raise HTTPException(403, "Only the platform owner can delete shared comps (they're used by every workspace).")
+    conds = []
+    if scope == "private":
+        conds.append(SoldComp.tenant_id == ctx.tenant_id)
+    elif scope == "shared":
+        conds.append(SoldComp.tenant_id.is_(None))
+    else:
+        conds.append(or_(SoldComp.tenant_id.is_(None), SoldComp.tenant_id == ctx.tenant_id))
+    if sale_id:
+        conds.append(SoldComp.sale_id == sale_id)
+    n = ctx.db.query(SoldComp).filter(*conds).delete(synchronize_session=False)
+    ctx.db.add(IngestLog(tenant_id=None if scope != "private" else ctx.tenant_id, kind="delete", filename=None,
+                         sale_id=sale_id, rows=n, status="ok",
+                         message=f"{ctx.user.email} deleted {n} {scope} sold comps" + (f" for sale {sale_id}" if sale_id else " (all sales)")))
+    ctx.db.commit()
+    return {"deleted": n}
+
+
+@app.delete("/api/data/lots")
+def delete_lots(sale_id: str | None = None, ctx: Ctx = Depends(current_ctx)):
+    """Delete this workspace's upcoming-sale lots (one sale, or all) and their stored meter readings."""
+    ctx.require_admin()
+    st = select(TargetLot).where(TargetLot.tenant_id == ctx.tenant_id)
+    if sale_id:
+        st = st.where(TargetLot.sale_id == sale_id)
+    lots = ctx.db.scalars(st).all()
+    ids = [t.id for t in lots]
+    keys = {(t.sale_date, location_key(t.location)) for t in lots}
+    if ids:  # outcomes keep their numbers but lose the link to the deleted lot
+        ctx.db.query(Outcome).filter(Outcome.target_lot_id.in_(ids)).update({Outcome.target_lot_id: None},
+                                                                           synchronize_session=False)
+    n = ctx.db.query(TargetLot).filter(TargetLot.id.in_(ids)).delete(synchronize_session=False) if ids else 0
+    rq = ctx.db.query(LotReading).filter(LotReading.tenant_id == ctx.tenant_id)
+    if sale_id:
+        still = {(t.sale_date, location_key(t.location)) for t in ctx.db.scalars(
+            select(TargetLot).where(TargetLot.tenant_id == ctx.tenant_id))}
+        gone = [k for k in keys if k not in still and k[0] is not None]
+        r = 0
+        for d, key in gone:
+            r += rq.filter(LotReading.sale_date == d, LotReading.location_key == key).delete(synchronize_session=False)
+        r += ctx.db.query(LotReading).filter(LotReading.tenant_id == ctx.tenant_id,
+                                             LotReading.sale_id == sale_id).delete(synchronize_session=False)
+    else:
+        r = rq.delete(synchronize_session=False)
+    ctx.db.add(IngestLog(tenant_id=ctx.tenant_id, kind="delete", sale_id=sale_id, rows=n, status="ok",
+                         message=f"{ctx.user.email} deleted {n} upcoming-sale lots and {r} mileage/hour readings"
+                                 + (f" for sale {sale_id}" if sale_id else " (all sales)")))
+    ctx.db.commit()
+    return {"deleted": n, "readings_deleted": r}
 
 
 # ================================================================== comps

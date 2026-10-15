@@ -30,7 +30,11 @@ def comp_scope(tenant_id: int, settings: dict):
 
 
 def load_comps(db: Session, tenant_id: int, settings: dict) -> list[dict]:
-    return [row_dict(c, COMP_COLS) for c in db.scalars(select(SoldComp).where(comp_scope(tenant_id, settings)))]
+    """Shared pool + this tenant's private comps. A sale loaded into both pools counts once
+    (the private copy wins) — otherwise every lot of that sale would be double-weighted."""
+    rows = [row_dict(c, COMP_COLS) for c in db.scalars(select(SoldComp).where(comp_scope(tenant_id, settings)))]
+    private = {(r["sale_id"], r["lot_no"]) for r in rows if r["tenant_id"] is not None}
+    return [r for r in rows if r["tenant_id"] is not None or (r["sale_id"], r["lot_no"]) not in private]
 
 
 class PricingCache:

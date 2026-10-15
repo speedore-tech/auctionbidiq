@@ -712,6 +712,65 @@ function ingestDone(r) {
 }
 const catalogDone = ingestDone;
 
+// ------------------------------------------------------------------ manage data (delete & reload)
+function confirmDelete(what) {
+  const v = prompt(`This permanently deletes ${what}.\n\nType DELETE to confirm:`);
+  return v !== null && v.trim().toUpperCase() === "DELETE";
+}
+
+async function renderManageData(el, onChange) {
+  const d = await api("/data/summary");
+  if (!d.is_admin) { el.innerHTML = ""; return; }
+  const dupSales = d.comps.filter((r) => r.duplicated).length;
+  const dupLots = d.lots.filter((r) => r.same_sale_as.length).length;
+  el.innerHTML = `<details class="panel" id="mdPanel"${dupSales || dupLots ? " open" : ""}><summary><b>Manage data</b>
+      <span class="muted small">— delete historical comps or upcoming-sale lots, then reload</span>
+      ${dupSales ? `<span class="chip medium">${dupSales} sale(s) loaded twice</span>` : ""}${dupLots ? `<span class="chip medium">upcoming sale loaded under 2 IDs</span>` : ""}</summary>
+    <div class="grid g2" style="margin-top:10px">
+      <div><h3>Historical sold comps (result sheets)</h3>
+        <p class="small muted">"Shared" comps are used by every workspace${d.can_delete_shared ? "" : " — only the platform owner can delete them"}. A sale in both pools is only counted once when pricing.</p>
+        <div class="table-wrap" style="max-height:340px;overflow:auto"><table>
+          <tr><th>Sale</th><th>Date</th><th>Location</th><th class="num">Shared</th><th class="num">Mine</th><th></th></tr>
+          ${d.comps.map((r) => `<tr><td>${esc(r.sale_id)}${r.duplicated ? ' <span class="chip medium">both pools</span>' : ""}</td><td>${esc(r.sale_date || "")}</td><td class="small">${esc(r.location || "")}</td>
+            <td class="num">${r.shared}</td><td class="num">${r.private}</td>
+            <td class="row">${r.private ? `<button type="button" class="danger" data-dc="private" data-sale="${esc(r.sale_id)}">Delete mine</button>` : ""}
+              ${r.shared && d.can_delete_shared ? `<button type="button" class="danger" data-dc="shared" data-sale="${esc(r.sale_id)}">Delete shared</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6" class="muted">No result sheets loaded.</td></tr>'}
+        </table></div>
+        <p class="row">${d.comps.some((r) => r.private) ? '<button type="button" class="danger" data-dc="private">Delete ALL my private comps</button>' : ""}
+          ${d.can_delete_shared && d.comps.some((r) => r.shared) ? '<button type="button" class="danger" data-dc="all">Delete ALL historical comps (shared + mine)</button>' : ""}</p></div>
+      <div><h3>Upcoming-sale lots (catalogs)</h3>
+        <p class="small muted">Deleting a sale's lots also removes its stored mileage / reefer-hour readings. Logged outcomes are kept.</p>
+        <div class="table-wrap" style="max-height:340px;overflow:auto"><table>
+          <tr><th>Sale</th><th>Date</th><th>Location</th><th class="num">Lots</th><th></th></tr>
+          ${d.lots.map((r) => `<tr><td>${esc(r.sale_id || "—")}${r.same_sale_as.length ? ` <span class="chip medium" title="Same date & place as ${esc(r.same_sale_as.join(", "))}">duplicate of ${esc(r.same_sale_as.join(", "))}</span>` : ""}</td>
+            <td>${esc(r.sale_date || "")}</td><td class="small">${esc(r.location || "")}</td><td class="num">${r.lots}</td>
+            <td><button type="button" class="danger" data-dl="${esc(r.sale_id || "")}">Delete lots</button></td></tr>`).join("") || '<tr><td colspan="5" class="muted">No upcoming-sale lots.</td></tr>'}
+        </table></div>
+        ${d.lots.length ? '<p><button type="button" class="danger" data-dl-all="1">Delete ALL upcoming-sale lots</button></p>' : ""}</div>
+    </div></details>`;
+  const done = async (msg) => { toast(msg); META = null; await renderManageData(el, onChange); if (onChange) onChange(); };
+  $$("[data-dc]", el).forEach((b) => b.onclick = async () => {
+    const scope = b.dataset.dc, sale = b.dataset.sale;
+    const label = { private: "your private", shared: "SHARED (every workspace's)", all: "ALL shared and private" }[scope];
+    if (!confirmDelete(`${label} sold comps${sale ? " for sale " + sale : " for every sale"}`)) return;
+    try {
+      const r = await api(`/data/comps?scope=${scope}${sale ? "&sale_id=" + encodeURIComponent(sale) : ""}`, { method: "DELETE" });
+      await done(`Deleted ${r.deleted} sold comps`);
+    } catch (err) { toast(err.message); }
+  });
+  $$("[data-dl]", el).forEach((b) => b.onclick = async () => {
+    const sale = b.dataset.dl;
+    if (!confirmDelete(`all upcoming-sale lots for sale ${sale}`)) return;
+    try { const r = await api(`/data/lots?sale_id=${encodeURIComponent(sale)}`, { method: "DELETE" }); await done(`Deleted ${r.deleted} lots`); }
+    catch (err) { toast(err.message); }
+  });
+  $$("[data-dl-all]", el).forEach((b) => b.onclick = async () => {
+    if (!confirmDelete("ALL upcoming-sale lots in your workspace")) return;
+    try { const r = await api("/data/lots", { method: "DELETE" }); await done(`Deleted ${r.deleted} lots`); }
+    catch (err) { toast(err.message); }
+  });
+}
+
 // ------------------------------------------------------------------ ingest
 function ingestLogRows(log) {
   return log.map((l) => `<tr><td class="small">${esc(l.created_at.replace("T", " ").slice(0, 16))}</td><td>${esc(l.kind)}${l.shared ? ' <span class="chip">shared</span>' : ""}</td><td class="small">${esc(l.filename)}</td><td>${esc(l.sale_id || "")}</td><td class="num">${l.rows}</td><td><span class="chip ${l.status === "ok" ? "good" : "medium"}">${esc(l.status)}</span></td><td class="small">${esc(l.message || "")}</td></tr>`).join("");
@@ -751,6 +810,7 @@ async function viewIngest(app) {
       <p><button class="primary">Ingest sheets</button></p>
       <details><summary>CSV columns</summary><div class="small mono">lot, odometer (thousands ok), ecm_miles, total_hours, engine_hours, electric_hours</div></details></form>
   </div>
+  <div id="manageData"></div>
   <div class="panel"><h2>Ingest log</h2><div class="table-wrap"><table id="logTable"><tr><th>When</th><th>Kind</th><th>File</th><th>Sale</th><th class="num">Rows</th><th>Status</th><th>Message</th></tr>
     ${ingestLogRows(log)}
   </table></div></div>`;
@@ -759,12 +819,14 @@ async function viewIngest(app) {
     const t = $("#logTable");
     t.innerHTML = t.rows[0].outerHTML + ingestLogRows(l);
   };
+  const refreshManage = () => renderManageData($("#manageData"), refreshLog);
+  refreshManage();
   let lastSale = null;
   bindUploader($("#fa"), "/ingest/auto", {
     prepare: (file, form) => saleFields(file, form),
     done: (r) => { if (r.kind !== "results" && r.sale_id) lastSale = r.sale_id; return ingestDone(r); },
     after: () => {
-      refreshLog();
+      refreshLog(); refreshManage();
       if (lastSale) $("#faGo").innerHTML = `<a class="btn" href="#/targets?sale_id=${encodeURIComponent(lastSale)}">See target prices for sale ${esc(lastSale)} →</a>`;
     },
   });
@@ -773,10 +835,10 @@ async function viewIngest(app) {
     prepare: (file, form, many) => ({ visibility: form.elements.visibility.value, sale_id: many ? "" : form.elements.sale_id.value.trim() }),
     done: ingestDone,
     onCount: (n, form) => { $("#ovr", form).hidden = n > 1; },
-    after: refreshLog,
+    after: () => { refreshLog(); refreshManage(); },
   });
-  bindUploader($("#fc"), "/ingest/catalog", { prepare: catalogPrepare, done: ingestDone, after: refreshLog });
-  bindUploader($("#fm"), "/ingest/mileage", { prepare: (file, form) => saleFields(file, form), done: ingestDone, after: refreshLog });
+  bindUploader($("#fc"), "/ingest/catalog", { prepare: catalogPrepare, done: ingestDone, after: () => { refreshLog(); refreshManage(); } });
+  bindUploader($("#fm"), "/ingest/mileage", { prepare: (file, form) => saleFields(file, form), done: ingestDone, after: () => { refreshLog(); refreshManage(); } });
 }
 
 // ------------------------------------------------------------------ comps

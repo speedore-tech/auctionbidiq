@@ -225,6 +225,17 @@ def ingest_catalog(db: Session, recs: list[dict], tenant_id: int, sale_id: str |
     sale_id = resolve_sale_id(db, tenant_id, sale_id, sale_date, location)
     if not sale_id:
         raise ValueError("Couldn't tell which sale this catalog is for — enter a Sale ID (or the sale date + location).")
+    # The same sale already loaded under another id (e.g. "20261015" typed once, "2026062" from a filename)?
+    # Update that set of lots instead of creating a duplicate set.
+    merged_into = None
+    if sale_date:
+        key = location_key(location)
+        other = {t.sale_id for t in db.scalars(select(TargetLot).where(
+            TargetLot.tenant_id == tenant_id, TargetLot.sale_date == sale_date, TargetLot.sale_id != sale_id))
+            if key is None or location_key(t.location) in (None, key)}
+        if len(other) == 1:
+            merged_into = sale_id
+            sale_id = other.pop()
     sale = ensure_sale(db, sale_id, sale_date, location, upcoming=True)
     existing = {t.lot_no: t for t in db.scalars(select(TargetLot).where(
         TargetLot.tenant_id == tenant_id, TargetLot.sale_id == sale_id))}
@@ -249,6 +260,8 @@ def ingest_catalog(db: Session, recs: list[dict], tenant_id: int, sale_id: str |
     db.flush()
     applied = _apply_stored_readings(db, tenant_id, list(existing.values()), sale.sale_date, sale.location)
     msg = f"{created} new / {updated} updated target lots"
+    if merged_into:
+        msg += f" (this sale was already loaded as {sale_id}; updated those lots instead of duplicating under {merged_into})"
     if applied:
         msg += f"; mileage/hours applied to {applied} lots from sheets already uploaded"
     log(db, tenant_id, "catalog", source_file, sale_id, created + updated, "ok", msg)
