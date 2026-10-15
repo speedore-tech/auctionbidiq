@@ -606,6 +606,37 @@ def _eval(body: EvalIn, ctx: Ctx) -> dict:
     return evaluate(ctx.db, ctx.tenant_id, ctx.settings, lot, body.overrides)
 
 
+# ================================================================== auction-day analysis
+@app.get("/api/analysis/sales")
+def analysis_sales(ctx: Ctx = Depends(current_ctx)):
+    """Past sales with result sheets loaded (the ones that can be analysed)."""
+    comps = load_comps(ctx.db, ctx.tenant_id, ctx.settings)
+    sales: dict[str, dict] = {}
+    for c in comps:
+        r = sales.setdefault(c["sale_id"], {"sale_id": c["sale_id"], "sale_date": c["sale_date"], "location": c["location"], "lots": 0})
+        r["lots"] += 1
+    out = sorted(sales.values(), key=lambda r: r["sale_date"] or date.min, reverse=True)
+    return [_j(r) for r in out]
+
+
+@app.get("/api/analysis/sale/{sale_id}")
+def analysis_sale(sale_id: str, ctx: Ctx = Depends(current_ctx)):
+    from ..analysis import GROUP_KEYS, analyze_sale, categories
+    res = analyze_sale(load_comps(ctx.db, ctx.tenant_id, ctx.settings), sale_id, ctx.settings)
+    res["categories"] = {k: categories(res["lots"], k, min_n=3) for k in GROUP_KEYS if k != "location"}
+    return res
+
+
+@app.get("/api/analysis/trends")
+def analysis_trends(include_low: bool = False, min_n: int = 5, ctx: Ctx = Depends(current_ctx)):
+    """Across every loaded sale: which kinds of units keep selling below / above fair value."""
+    from ..analysis import GROUP_KEYS, analyze_all, categories, summarize
+    rows = analyze_all(load_comps(ctx.db, ctx.tenant_id, ctx.settings), ctx.settings)
+    use = rows if include_low else [r for r in rows if r["confidence"] != "Low"]
+    return {"summary": summarize(use), "sales": len({r["sale_id"] for r in use}),
+            "categories": {k: categories(use, k, min_n=max(2, min_n)) for k in GROUP_KEYS}}
+
+
 # ================================================================== targets / bid sheet
 def _get_target(ctx: Ctx, tid: int) -> TargetLot:
     t = ctx.db.get(TargetLot, tid)
@@ -692,6 +723,8 @@ def _bidsheet_rows(ctx: Ctx, sale_id: str | None) -> list[dict]:
     if sale_id:
         st = st.where(TargetLot.sale_id == sale_id)
     cache = PricingCache(ctx.db, ctx.tenant_id, ctx.settings)
+    from ..analysis import analyze_all, below_fair_rates
+    hist = below_fair_rates(analyze_all(load_comps(ctx.db, ctx.tenant_id, ctx.settings), ctx.settings))
     out = []
     for t in ctx.db.scalars(st.order_by(TargetLot.run_order, TargetLot.lot_no)):
         lot = row_dict(t, LOT_COLS)
@@ -700,6 +733,7 @@ def _bidsheet_rows(ctx: Ctx, sale_id: str | None) -> list[dict]:
         row["checklist"] = t.checklist or {}
         row["deposit"] = ev["recommendation"].get("deposit")
         row["sale_location"] = (ev.get("sale") or {}).get("location")
+        row["history"] = hist.get(row.get("model_group"))   # how often this model sold below fair value
         out.append(row)
     return out
 

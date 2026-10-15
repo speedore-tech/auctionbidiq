@@ -189,3 +189,33 @@ def test_duplicates_prevented_and_delete_reload(tmp_path):
     assert client.delete("/api/data/lots?sale_id=20261015", headers=h).json()["deleted"] == 9
     assert client.get("/api/targets", headers=h).json() == []
     assert up("shared").json()["rows"] == len(SAMPLE_ROWS)    # reload works after delete
+
+
+def test_auction_day_analysis(tmp_path):
+    from .conftest import make_comps
+    h = _register("analyst@example.test", "Analyst Co")
+    # two sales of LT625s: the later one is analysed using only the earlier one
+    import csv as _csv
+    def sheet(path, sale_id, d, comps):
+        with open(path, "w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(["sale_id", "sale_date", "location", "lot_no", "year", "make", "class", "model", "engine", "desc", "miles", "sold_price"])
+            for c in comps:
+                w.writerow([sale_id, d, "PEKIN", c["lot_no"], c["year"], "INTER", "CONV", "LT625", "NAVISTAR A26", "73IN RAISED SLP", c["miles"], c["sold_price"]])
+    early, late = tmp_path / "a.csv", tmp_path / "b.csv"
+    sheet(early, "3000001", "2026-07-01", make_comps(n=60, seed=7))
+    cheap = [dict(c, sold_price=round(c["sold_price"] * 0.6)) for c in make_comps(n=20, seed=8)]   # a cold sale
+    sheet(late, "3000002", "2026-08-01", cheap)
+    for f in (early, late):
+        assert client.post("/api/ingest/results", headers=h, data={"visibility": "private"},
+                           files={"file": (f.name, f.read_bytes(), "text/csv")}).status_code == 200
+    sales = client.get("/api/analysis/sales", headers=h).json()
+    assert {"3000001", "3000002"} <= {s["sale_id"] for s in sales}
+    d = client.get("/api/analysis/sale/3000002", headers=h).json()
+    assert d["summary"]["n"] == 20 and d["summary"]["below_fair_pct"] >= 80   # sold ~40% under: mostly below fair
+    assert all(r["verdict"] in ("bargain", "below", "above", "premium") for r in d["lots"])
+    assert d["categories"]["model_group"][0]["key"] == "INTL_LT625"
+    first = client.get("/api/analysis/sale/3000001", headers=h).json()
+    assert first["summary"].get("n", 0) == 0                                  # oldest sale: nothing earlier to compare
+    tr = client.get("/api/analysis/trends?include_low=true&min_n=2", headers=h).json()
+    assert tr["summary"]["n"] >= 20 and tr["categories"]["location"]

@@ -72,6 +72,12 @@ def _result_row_fixups(rec: dict) -> None:
                 rec["door_type"] = "rollup"
         if m := re.search(r"\b(\d{2})\s*FT", text):
             rec.setdefault("body_length_ft", float(m.group(1)))
+        # trailer description text spills into the ENGINE column; only a reefer unit is an "engine"
+        unit = clean(rec.get("engine_raw"))
+        if not re.search(r"THERMO|CARRIER|\bTK\b|PRECEDENT|VECTOR|\bX4\b|\bS-?\d{3}|UNIT", unit):
+            if rec.get("engine_raw"):
+                rec["desc_raw"] = " ".join(x for x in (rec.get("engine_raw"), rec.get("desc_raw")) if x)[:120]
+            rec["engine_raw"] = None
 
 
 def ingest_results(db: Session, parsed: ParsedSheet, tenant_id: int | None, source_file: str,

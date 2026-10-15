@@ -58,7 +58,7 @@ const opt = (vals, sel, blank = true) => (blank ? '<option value=""></option>' :
 const routes = {
   login: viewLogin, dashboard: viewDashboard, price: viewPrice, targets: viewTargets, target: viewTarget,
   live: viewLive, bidsheet: viewBidsheet, multilot: viewMultilot, ingest: viewIngest, comps: viewComps,
-  fmv: viewFmv, outcomes: viewOutcomes, settings: viewSettings, users: viewUsers,
+  fmv: viewFmv, outcomes: viewOutcomes, settings: viewSettings, users: viewUsers, analysis: viewAnalysis,
 };
 let ME = null;
 async function router() {
@@ -339,7 +339,7 @@ async function viewTargets(app, _arg, params) {
       <span class="spacer"></span><span class="muted small" id="tcount"></span></div>
       <div class="table-wrap"><table id="ttable">
       <tr><th>Sale</th><th>Lot</th><th>Unit</th><th class="num">Miles/Hrs</th><th>CDL</th><th class="num">N</th><th>Conf.</th>
-        <th class="num">Target</th><th class="num">Walk</th><th class="num">Ceiling</th><th class="num">Ceiling all-in</th><th class="num">Win@target</th><th class="num">Equity@target</th><th>Flags</th><th>Status</th><th></th></tr>
+        <th class="num">Target</th><th class="num">Walk</th><th class="num">Ceiling</th><th class="num">Ceiling all-in</th><th class="num">Win@target</th><th class="num">Equity@target</th><th title="How often this model sold below fair value at past sales">History</th><th>Flags</th><th>Status</th><th></th></tr>
       ${sortLots(sheet.rows).map((r) => `<tr data-ok="${r.ok ? 1 : 0}" data-st="${esc(r.status || "")}" data-q="${esc([r.lot_no, r.year, r.make, r.model_raw, r.model_group, r.engine_family, r.body_class].join(" ").toLowerCase())}">
         <td>${esc(r.sale_id || "")}</td><td><b>${esc(r.lot_no || "")}</b></td>
         <td><a href="#/target/${r.id}">${esc(r.year || "")} ${esc(r.make || "")} ${esc(r.model_raw || r.model_group || "")}</a><div class="small muted">${esc(r.model_group || "")} · ${esc(r.engine_family || "")}</div></td>
@@ -349,6 +349,7 @@ async function viewTargets(app, _arg, params) {
         <td class="num">${money(r.hammer.target)}</td><td class="num">${money(r.hammer.walk_away)}</td><td class="num"><b>${money(r.hammer.hard_ceiling)}</b></td>
         <td class="num">${money(r.all_in.hard_ceiling)}</td><td class="num">${pct(r.win_prob.target)}</td>
         <td class="num">${r.equity_target ? money(r.equity_target.dollars) : "—"}</td>` : `<td colspan="8" class="small muted">${esc(shortError(r))}</td>`}
+        <td>${historyChip(r.history)}</td>
         <td>${r.flags.map((f) => `<span class="chip">${esc(f)}</span>`).join("")}</td>
         <td>${r.status === "scratched" ? '<span class="chip high">scratched</span>' : esc(r.status || "")}</td>
         <td class="small"><a href="#/live/${r.id}">live</a></td></tr>`).join("") || '<tr><td colspan="16" class="muted">No target lots. Ingest a catalog (Ingest page) or save one from Quick price.</td></tr>'}
@@ -383,6 +384,12 @@ function sortLots(rows) {
     const x = lotKey(a.lot_no), y = lotKey(b.lot_no);
     return x[0] !== y[0] ? (x[0] < y[0] ? -1 : 1) : x[1] !== y[1] ? x[1] - y[1] : (x[2] < y[2] ? -1 : x[2] > y[2] ? 1 : 0);
   });
+}
+function historyChip(h) {
+  if (!h) return '<span class="muted small">—</span>';
+  const cls = h.rate >= 60 ? "good" : h.rate <= 40 ? "high" : "";
+  const word = h.rate >= 60 ? "often cheap" : h.rate <= 40 ? "bid up" : "mixed";
+  return `<span class="chip ${cls}" title="${h.n} past lots of this model: ${h.rate}% sold below fair, ${h.premium_pct}% above p75, median ${pctTxt(h.median_diff_pct)} vs fair">${h.rate}% below · ${word}</span>`;
 }
 function shortError(r) {
   return /No comps/i.test(r.error || "") ? `No sold history for ${r.model_group || "this model"} yet — load result sheets or a retail price` : r.error;
@@ -711,6 +718,138 @@ function ingestDone(r) {
   return (r.note ? r.note + " " : "") + msg;
 }
 const catalogDone = ingestDone;
+
+// ------------------------------------------------------------------ auction-day analysis
+const VERDICT = {
+  bargain: { label: "Bargain", cls: "good", tip: "Sold below p25 — cheaper than 3 in 4 comparable units" },
+  below: { label: "Below fair", cls: "good", tip: "Sold between p25 and fair value" },
+  above: { label: "Above fair", cls: "medium", tip: "Sold between fair value and p75" },
+  premium: { label: "Premium", cls: "high", tip: "Sold above p75 — bid up hard" },
+};
+const GROUP_LABEL = { model_group: "Model", body_class: "Type", make: "Make", engine_family: "Engine", age_band: "Age", miles_band: "Mileage", location: "Location" };
+const pctTxt = (v) => (v === null || v === undefined) ? "—" : (v > 0 ? "+" : "") + v.toFixed(1) + "%";
+
+function diffBar(p) {
+  if (p === null || p === undefined) return "";
+  const w = Math.min(50, Math.abs(p) / 2);           // ±100% fills half the cell
+  const col = p < 0 ? "var(--good)" : "var(--bad)";
+  return `<div style="position:relative;height:6px;background:var(--chip);border-radius:3px;margin-top:3px">
+    <div style="position:absolute;top:0;height:6px;border-radius:3px;background:${col};${p < 0 ? `right:50%;width:${w}%` : `left:50%;width:${w}%`}"></div>
+    <div style="position:absolute;left:50%;top:-2px;width:1px;height:10px;background:var(--muted)"></div></div>`;
+}
+
+function categoryTable(rows, key, opts = {}) {
+  if (!rows || !rows.length) return '<div class="muted small">Not enough lots per group.</div>';
+  return `<div class="table-wrap"${opts.maxh ? ` style="max-height:${opts.maxh}px;overflow:auto"` : ""}><table>
+    <tr><th>${esc(GROUP_LABEL[key] || key)}</th><th class="num">Lots</th>${opts.sales ? '<th class="num">Sales</th>' : ""}<th class="num">Sold below fair</th>
+      <th class="num">Bargains</th><th class="num">Premium</th><th class="num">Median vs fair</th></tr>
+    ${rows.map((c) => `<tr><td>${esc(c.key)}</td><td class="num">${c.n}</td>${opts.sales ? `<td class="num">${c.sales}</td>` : ""}
+      <td class="num"><b>${c.below_fair_pct}%</b></td><td class="num">${c.bargain_pct}%</td><td class="num">${c.premium_pct}%</td>
+      <td class="num" style="min-width:110px">${pctTxt(c.median_diff_pct)}${diffBar(c.median_diff_pct)}</td></tr>`).join("")}</table></div>`;
+}
+
+async function viewAnalysis(app, _arg, params) {
+  const sales = await api("/analysis/sales");
+  const mode = params.get("view") || "day";
+  const saleId = params.get("sale_id") || (sales[0] && sales[0].sale_id) || "";
+  app.innerHTML = `<div class="panel"><div class="row">
+      <h1 style="margin:0">Auction analysis</h1>
+      <div class="tabs" style="margin:0"><button data-v="day" class="${mode === "day" ? "active" : ""}">One auction day</button>
+        <button data-v="all" class="${mode === "all" ? "active" : ""}">Patterns across all sales</button></div>
+      <span class="spacer"></span>
+      ${mode === "day" ? `<select id="anSale" style="width:auto">${sales.map((s) => `<option value="${esc(s.sale_id)}" ${s.sale_id === saleId ? "selected" : ""}>${esc(s.sale_id)} · ${esc(s.sale_date || "")} · ${esc(s.location || "")} (${s.lots})</option>`).join("")}</select>` : ""}</div>
+    <p class="small muted" style="margin:8px 0 0">Each lot is priced the way BidIQ would have priced it the morning of that sale — using <b>only earlier sales</b> —
+      and compared with what it actually hammered for. <span class="chip good">Bargain</span> = below p25 · <span class="chip good">Below fair</span> = p25–fair ·
+      <span class="chip medium">Above fair</span> = fair–p75 · <span class="chip high">Premium</span> = above p75.</p></div>
+    <div id="anBody"><div class="panel muted">Analysing…</div></div>`;
+  $$(".tabs button", app).forEach((b) => b.onclick = () => { location.hash = `#/analysis?view=${b.dataset.v}${saleId ? "&sale_id=" + encodeURIComponent(saleId) : ""}`; });
+  if (!sales.length) { $("#anBody").innerHTML = '<div class="note">No result sheets loaded yet — upload past auction results on the Ingest page.</div>'; return; }
+  if (mode === "all") return renderTrends($("#anBody"));
+  $("#anSale").onchange = (e) => { location.hash = `#/analysis?view=day&sale_id=${encodeURIComponent(e.target.value)}`; };
+  const d = await api("/analysis/sale/" + encodeURIComponent(saleId));
+  const s = d.summary;
+  if (!s || !s.n) { $("#anBody").innerHTML = `<div class="note">${esc(d.message || "No earlier sales to compare against — this is the oldest sale loaded, so there's no history to price it from.")}</div>`; return; }
+  const types = [...new Set(d.lots.map((r) => r.body_class))].sort();
+  $("#anBody").innerHTML = `
+    <div class="grid g4">
+      <div class="panel"><div class="kpi">${s.n}</div><div class="kpi-label">Lots analysed · ${esc(d.location || "")} ${esc(d.sale_date || "")}${d.skipped.no_history ? ` · ${d.skipped.no_history} with no history` : ""}</div></div>
+      <div class="panel"><div class="kpi" style="color:var(--good)">${s.below_fair_pct}%</div><div class="kpi-label">Sold below fair value (${s.bargain_pct}% bargains)</div></div>
+      <div class="panel"><div class="kpi" style="color:var(--bad)">${s.premium_pct}%</div><div class="kpi-label">Bid up above p75 (premium)</div></div>
+      <div class="panel"><div class="kpi">${pctTxt(s.median_diff_pct)}</div><div class="kpi-label">Median vs fair · ${money(s.total_actual)} hammer vs ${money(s.total_fair)} fair</div></div>
+    </div>
+    <div class="panel"><div class="row">
+      <h2 style="margin:0">Patterns this day</h2><span class="spacer"></span>
+      <select id="anGroup" style="width:auto">${Object.keys(d.categories).map((k) => `<option value="${k}">${GROUP_LABEL[k]}</option>`).join("")}</select></div>
+      <p class="small muted">Sorted by how often that kind of unit sold below fair — top rows were the easiest to buy well at this sale.</p>
+      <div id="anCats"></div></div>
+    <div class="panel"><div class="row" style="margin-bottom:8px">
+      <h2 style="margin:0">Every lot</h2>
+      <div class="tabs" id="anVerdict" style="margin:0"><button class="active" data-f="">All</button><button data-f="cheap">Below fair</button><button data-f="bargain">Bargains</button>
+        <button data-f="dear">Above fair</button><button data-f="premium">Premium</button></div>
+      <select id="anType" style="width:auto"><option value="">All types</option>${types.map((t) => `<option>${esc(t)}</option>`).join("")}</select>
+      <label style="margin:0"><input type="checkbox" id="anHideLow" checked> Hide low-confidence</label>
+      <input id="anQ" placeholder="Search lot, make, model…" style="max-width:220px">
+      <span class="spacer"></span><span class="small muted" id="anCount"></span></div>
+      <div class="table-wrap" style="max-height:640px;overflow:auto"><table id="anTable">
+        <tr><th>Lot</th><th>Unit</th><th class="num">Miles / hrs</th><th class="num">Hammer</th><th class="num">Fair (p50)</th><th class="num">Expected range</th>
+          <th class="num">vs fair</th><th>Verdict</th><th>Conf.</th></tr>
+        ${[...d.lots].sort((a, b) => a.diff_pct - b.diff_pct).map((r) => `<tr data-v="${r.verdict}" data-t="${esc(r.body_class)}" data-c="${r.confidence}"
+            data-q="${esc([r.lot_no, r.year, r.make, r.model_raw, r.model_group, r.engine_family].join(" ").toLowerCase())}">
+          <td><b>${esc(r.lot_no)}</b></td>
+          <td>${esc(r.year || "")} ${esc(r.make || "")} ${esc(r.model_raw || "")}<div class="small muted">${esc(r.model_group || "")} · ${esc(r.engine_family || "")}</div></td>
+          <td class="num">${r.miles != null ? num(r.miles) : r.hours != null ? num(r.hours) + " h" : "—"}</td>
+          <td class="num"><b>${money(r.actual)}</b></td><td class="num">${money(r.fair)}</td>
+          <td class="num small">${money(r.p25)} – ${money(r.p75)}</td>
+          <td class="num" style="min-width:110px">${money(r.diff)} <span class="small">(${pctTxt(r.diff_pct)})</span>${diffBar(r.diff_pct)}</td>
+          <td><span class="chip ${VERDICT[r.verdict].cls}" title="${VERDICT[r.verdict].tip}">${VERDICT[r.verdict].label}</span></td>
+          <td><span class="chip conf-${r.confidence}" title="Comparable sales: ${r.n}">${r.confidence}</span></td></tr>`).join("")}
+      </table></div></div>`;
+  const drawCats = () => { const k = $("#anGroup").value; $("#anCats").innerHTML = categoryTable(d.categories[k], k, { maxh: 380 }); };
+  $("#anGroup").onchange = drawCats; drawCats();
+  let vf = "";
+  const apply = () => {
+    const q = $("#anQ").value.trim().toLowerCase(), t = $("#anType").value, hideLow = $("#anHideLow").checked;
+    let n = 0;
+    $$("#anTable tr[data-v]").forEach((tr) => {
+      const v = tr.dataset.v;
+      const okV = !vf || (vf === "cheap" ? (v === "bargain" || v === "below") : vf === "dear" ? (v === "above" || v === "premium") : v === vf);
+      const ok = okV && (!t || tr.dataset.t === t) && (!hideLow || tr.dataset.c !== "Low") && (!q || tr.dataset.q.includes(q));
+      tr.hidden = !ok; n += ok;
+    });
+    $("#anCount").textContent = `${n} of ${d.lots.length} lots`;
+  };
+  $$("#anVerdict button").forEach((b) => b.onclick = () => { vf = b.dataset.f; $$("#anVerdict button").forEach((x) => x.classList.toggle("active", x === b)); apply(); });
+  $("#anType").onchange = apply; $("#anHideLow").onchange = apply; $("#anQ").oninput = debounce(apply, 150);
+  apply();
+}
+
+async function renderTrends(el) {
+  el.innerHTML = '<div class="panel muted">Analysing every loaded sale (a few seconds the first time)…</div>';
+  const d = await api("/analysis/trends");
+  const s = d.summary;
+  el.innerHTML = `
+    <div class="grid g4">
+      <div class="panel"><div class="kpi">${s.n}</div><div class="kpi-label">Lots across ${d.sales} sales (low-confidence prices excluded)</div></div>
+      <div class="panel"><div class="kpi" style="color:var(--good)">${s.below_fair_pct}%</div><div class="kpi-label">Sold below fair value overall</div></div>
+      <div class="panel"><div class="kpi" style="color:var(--bad)">${s.premium_pct}%</div><div class="kpi-label">Bid up above p75</div></div>
+      <div class="panel"><div class="kpi">${pctTxt(s.median_diff_pct)}</div><div class="kpi-label">Median hammer vs fair</div></div>
+    </div>
+    <div class="panel"><div class="row"><h2 style="margin:0">What to target · what to watch</h2><span class="spacer"></span>
+      <select id="trGroup" style="width:auto">${Object.keys(d.categories).filter((k) => k !== "location").map((k) => `<option value="${k}">${GROUP_LABEL[k]}</option>`).join("")}</select></div>
+      <div class="grid g2" style="margin-top:8px">
+        <div><h3>Most often sold BELOW fair — higher chance of buying well</h3><div id="trLow"></div></div>
+        <div><h3>Most often BID UP above p75 — set a firm walk-away</h3><div id="trHigh"></div></div>
+      </div></div>
+    <div class="panel"><h2>By auction location</h2>
+      <p class="small muted">Some yards run hot, some run cold. Positive = sold above the model's fair value.</p>
+      ${categoryTable(d.categories.location, "location", { sales: true })}</div>`;
+  const draw = () => {
+    const k = $("#trGroup").value, rows = d.categories[k] || [];
+    $("#trLow").innerHTML = categoryTable(rows.slice(0, 15), k, { sales: true });
+    $("#trHigh").innerHTML = categoryTable([...rows].sort((a, b) => b.premium_pct - a.premium_pct || (b.median_diff_pct || 0) - (a.median_diff_pct || 0)).slice(0, 15), k, { sales: true });
+  };
+  $("#trGroup").onchange = draw; draw();
+}
 
 // ------------------------------------------------------------------ manage data (delete & reload)
 function confirmDelete(what) {
