@@ -219,3 +219,47 @@ def test_auction_day_analysis(tmp_path):
     assert first["summary"].get("n", 0) == 0                                  # oldest sale: nothing earlier to compare
     tr = client.get("/api/analysis/trends?include_low=true&min_n=2", headers=h).json()
     assert tr["summary"]["n"] >= 20 and tr["categories"]["location"]
+
+
+def test_lock_bids_then_scorecard(tmp_path):
+    import csv as _csv
+    from .conftest import make_comps
+    from .tm_fixtures import render_catalog_pdf
+    h = _register("score@example.test", "Score Co")
+    hist = tmp_path / "hist.csv"
+    with open(hist, "w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["sale_id", "sale_date", "location", "lot_no", "year", "make", "class", "model", "engine", "miles", "sold_price"])
+        for c in make_comps(model_raw="M2 106", make="FRTL", engine="CUMMINS ISB 6.7", class_raw="TRUCK", desc="",
+                            n=30, base=60000, per_year=3000, per_100k=2500, mpy=40000, years=range(2016, 2024), seed=3):
+            w.writerow(["4000001", "2026-08-01", "PEKIN", f"M-{c['lot_no']}", c["year"], "FRTL", "TRUCK", "M2 106",
+                        "CUMMINS ISB 6.7", c["miles"], c["sold_price"]])
+    assert client.post("/api/ingest/results", headers=h, data={"visibility": "private"},
+                       files={"file": ("hist.csv", hist.read_bytes(), "text/csv")}).status_code == 200
+    cat = tmp_path / "catalog.pdf"
+    render_catalog_pdf(cat)
+    assert client.post("/api/ingest/auto", headers=h, data={"sale_id": "2026062"},
+                       files={"file": ("catalog.pdf", cat.read_bytes(), "application/pdf")}).status_code == 200
+    lock = client.post("/api/targets/lock?sale_id=2026062", headers=h).json()
+    assert lock["locked"] >= 1
+    m4 = next(t for t in client.get("/api/targets?sale_id=2026062", headers=h).json() if t["lot_no"] == "M-4")
+    snap = m4["last_recommendation"]
+    assert snap["locked"] and snap["hammer"]["target"] > 0
+    sc = client.get("/api/scorecard?sale_id=2026062", headers=h).json()
+    assert sc["summary"]["locked"] >= 1 and sc["summary"]["results_found"] == 0
+
+    # after the auction: the sale's own result sheet (M-4 sold well above the locked ceiling)
+    res = tmp_path / "res.csv"
+    actual = snap["hammer"]["hard_ceiling"] + 5000
+    with open(res, "w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["sale_id", "sale_date", "location", "lot_no", "year", "make", "class", "model", "engine", "miles", "sold_price"])
+        w.writerow(["2026062", "2026-10-15", "PEKIN", "M-4", 2023, "FRTL", "TRUCK", "M2 106", "CUMMINS ISB", 194000, actual])
+    assert client.post("/api/ingest/results", headers=h, data={"visibility": "private"},
+                       files={"file": ("res.csv", res.read_bytes(), "text/csv")}).status_code == 200
+    # viewing the lot after results must not overwrite the locked numbers
+    client.get(f"/api/targets/{m4['id']}/recommendation", headers=h)
+    sc = client.get("/api/scorecard?sale_id=2026062", headers=h).json()
+    row = next(r for r in sc["rows"] if r["lot_no"] == "M-4")
+    assert row["actual"] == actual and row["hammer"] == snap["hammer"] and row["outcome"] == "over"
+    assert sc["summary"]["scored"] == 1 and sc["summary"]["over_ceiling"] == 1

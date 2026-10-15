@@ -706,12 +706,26 @@ def delete_target(tid: int, ctx: Ctx = Depends(current_ctx)):
     return {"deleted": tid}
 
 
+@app.post("/api/targets/lock")
+def lock_targets(sale_id: str, ctx: Ctx = Depends(current_ctx)):
+    """Freeze the model's numbers for every lot of a sale (before the auction) for the scorecard."""
+    from ..scorecard import lock_sale
+    return lock_sale(ctx.db, ctx.tenant_id, ctx.settings, sale_id, ctx.user.email)
+
+
+@app.get("/api/scorecard")
+def get_scorecard(sale_id: str, ctx: Ctx = Depends(current_ctx)):
+    """Locked bids vs actual hammers (after the sale's result sheet is uploaded)."""
+    from ..scorecard import scorecard
+    return scorecard(ctx.db, ctx.tenant_id, sale_id)
+
+
 @app.get("/api/targets/{tid}/recommendation")
 def target_recommendation(tid: int, ctx: Ctx = Depends(current_ctx)):
     t = _get_target(ctx, tid)
     ev = evaluate(ctx.db, ctx.tenant_id, ctx.settings, row_dict(t, LOT_COLS))
     rec = ev["recommendation"]
-    if rec.get("ok"):  # snapshot for the flywheel (predicted vs actual later)
+    if rec.get("ok") and not (t.last_recommendation or {}).get("locked"):  # never overwrite a locked bid
         t.last_recommendation = {"p50": ev["prediction"]["p50"], "hammer": rec["hammer"], "all_in": rec["all_in"],
                                  "confidence": ev["prediction"]["confidence"]["level"], "as_of": date.today().isoformat()}
         ctx.db.commit()
@@ -734,6 +748,7 @@ def _bidsheet_rows(ctx: Ctx, sale_id: str | None) -> list[dict]:
         row["deposit"] = ev["recommendation"].get("deposit")
         row["sale_location"] = (ev.get("sale") or {}).get("location")
         row["history"] = hist.get(row.get("model_group"))   # how often this model sold below fair value
+        row["locked_at"] = (t.last_recommendation or {}).get("locked_at") if (t.last_recommendation or {}).get("locked") else None
         out.append(row)
     return out
 

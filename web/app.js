@@ -58,7 +58,7 @@ const opt = (vals, sel, blank = true) => (blank ? '<option value=""></option>' :
 const routes = {
   login: viewLogin, dashboard: viewDashboard, price: viewPrice, targets: viewTargets, target: viewTarget,
   live: viewLive, bidsheet: viewBidsheet, multilot: viewMultilot, ingest: viewIngest, comps: viewComps,
-  fmv: viewFmv, outcomes: viewOutcomes, settings: viewSettings, users: viewUsers, analysis: viewAnalysis,
+  fmv: viewFmv, outcomes: viewOutcomes, settings: viewSettings, users: viewUsers, analysis: viewAnalysis, scorecard: viewScorecard,
 };
 let ME = null;
 async function router() {
@@ -325,7 +325,10 @@ async function viewTargets(app, _arg, params) {
       <span class="spacer"></span>
       <a class="btn" href="#/price">+ Add via Quick price</a>
       <a class="btn" href="#/bidsheet${saleId ? "?sale_id=" + encodeURIComponent(saleId) : ""}">Printable bid sheet</a>
-      <button id="csv">Export CSV</button></div></div>
+      <button id="csv">Export CSV</button>
+      ${saleId ? `<button id="lockBids" class="primary" title="Freeze the model's numbers for every lot of this sale, to score them after the auction">🔒 ${sheet.rows.some((r) => r.locked_at) ? "Re-lock bids" : "Lock bids"}</button>
+        <a class="btn" href="#/scorecard?sale_id=${encodeURIComponent(saleId)}">Scorecard</a>` : ""}</div>
+      ${saleId && sheet.rows.some((r) => r.locked_at) ? `<div class="small muted" style="margin-top:6px">Bids locked ${esc(sheet.rows.find((r) => r.locked_at).locked_at.replace("T", " "))} — the Scorecard compares these frozen numbers with the actual hammers.</div>` : ""}</div>
     <details class="panel" id="catPanel"${sheet.rows.length ? "" : " open"}><summary><b>Import an upcoming sale</b> <span class="muted small">— drop the catalog plus its mileage &amp; reefer-hour sheets</span></summary>
       <form id="tc" style="margin-top:8px">${uploaderHtml("catalog + mileage/reefer sheets")}
         <div class="grid g3"><div><label>Sale ID <span class="muted">(optional)</span></label><input name="sale_id" value="${esc(saleId)}" placeholder="e.g. 2026062"></div>
@@ -368,6 +371,12 @@ async function viewTargets(app, _arg, params) {
   $("#tf").onchange = applyFilter;
   applyFilter();
   $("#saleSel").onchange = (e) => location.hash = "#/targets" + (e.target.value ? "?sale_id=" + encodeURIComponent(e.target.value) : "");
+  if ($("#lockBids")) $("#lockBids").onclick = async () => {
+    const again = sheet.rows.some((r) => r.locked_at);
+    if (again && !confirm("Bids are already locked. Re-locking replaces them with the model's current numbers — only do this BEFORE the auction. Continue?")) return;
+    try { const r = await api("/targets/lock?sale_id=" + encodeURIComponent(saleId), { method: "POST" }); toast(`Locked ${r.locked} lots`); router(); }
+    catch (err) { toast(err.message); }
+  };
   $("#csv").onclick = () => downloadAuthed("/bidsheet.csv" + (saleId ? "?sale_id=" + encodeURIComponent(saleId) : ""), `bidsheet_${saleId || "all"}.csv`);
   bindUploader($("#tc"), "/ingest/auto", { prepare: catalogPrepare, done: catalogDone, after: () => setTimeout(router, 1500) });
   if (saleId) renderSaleEditor($("#saleEdit"), sales.find((s) => s.sale_id === saleId) || { sale_id: saleId });
@@ -849,6 +858,62 @@ async function renderTrends(el) {
     $("#trHigh").innerHTML = categoryTable([...rows].sort((a, b) => b.premium_pct - a.premium_pct || (b.median_diff_pct || 0) - (a.median_diff_pct || 0)).slice(0, 15), k, { sales: true });
   };
   $("#trGroup").onchange = draw; draw();
+}
+
+// ------------------------------------------------------------------ scorecard (locked bids vs actual)
+const OUTCOME = {
+  target: { label: "Won at target", cls: "good" },
+  walk: { label: "Won at walk-away", cls: "good" },
+  ceiling: { label: "Won at ceiling", cls: "medium" },
+  over: { label: "Over ceiling — walked", cls: "high" },
+};
+
+async function viewScorecard(app, _arg, params) {
+  const saleId = params.get("sale_id") || "";
+  const q0 = params.get("q") || "";
+  const d = await api("/scorecard?sale_id=" + encodeURIComponent(saleId));
+  const s = d.summary || {};
+  const fmtPct = (v) => (v === null || v === undefined) ? "—" : (v > 0 ? "+" : "") + v + "%";
+  app.innerHTML = `<div class="panel"><div class="row">
+      <a href="#/targets?sale_id=${encodeURIComponent(saleId)}">← Targets</a>
+      <h1 style="margin:0">Scorecard — sale ${esc(saleId)} ${esc(d.sale_date || "")}</h1></div>
+      <p class="small muted" style="margin:6px 0 0">Your <b>locked</b> bids (frozen before the auction) against what each lot actually hammered for.
+        Upload the sale's result sheet on the Ingest page and this fills in automatically.</p></div>
+    ${!s.locked ? '<div class="note">No bids were locked for this sale. Use <b>Lock bids</b> on the Targets page before the auction.</div>' : ""}
+    ${s.locked && !s.results_found ? '<div class="note info">Bids are locked. Waiting for the result sheet — upload it on the Ingest page after the auction.</div>' : ""}
+    ${s.scored ? `<div class="grid g4">
+      <div class="panel"><div class="kpi">${s.scored}</div><div class="kpi-label">Locked lots with a result (${s.locked} locked, ${s.results_found} results)</div></div>
+      <div class="panel"><div class="kpi">${s.median_abs_err_pct}%</div><div class="kpi-label">Median error of fair value · bias ${fmtPct(s.median_err_pct)} (+ = model too high)</div></div>
+      <div class="panel"><div class="kpi">${s.in_range_pct}%</div><div class="kpi-label">Hammer inside predicted p25–p75</div></div>
+      <div class="panel"><div class="kpi">${s.won_at_target} · ${s.won_at_walk} · ${s.won_at_ceiling}</div><div class="kpi-label">Would have won at target · walk-away · ceiling (${s.over_ceiling} went over)</div></div>
+    </div>` : ""}
+    <div class="panel"><div class="row" style="margin-bottom:8px">
+      <input id="scQ" placeholder="Filter, e.g. M2, M-, Cascadia…" value="${esc(q0)}" style="max-width:260px">
+      <label style="margin:0"><input type="checkbox" id="scOnly" ${s.scored ? "checked" : ""}> Only lots with a result</label>
+      <span class="spacer"></span><span class="small muted" id="scCount"></span></div>
+      <div class="table-wrap" style="max-height:680px;overflow:auto"><table id="scTable">
+        <tr><th>Lot</th><th>Unit</th><th class="num">Miles</th><th class="num">Fair (locked)</th><th class="num">Range</th>
+          <th class="num">Target</th><th class="num">Walk</th><th class="num">Ceiling</th><th class="num">Actual hammer</th>
+          <th class="num">Model vs actual</th><th>Outcome</th><th>Conf.</th></tr>
+        ${sortLots(d.rows).map((r) => `<tr data-has="${r.actual != null ? 1 : 0}" data-q="${esc([r.lot_no, r.year, r.make, r.model_raw, r.model_group, r.engine_family].join(" ").toLowerCase())}">
+          <td><b>${esc(r.lot_no)}</b></td>
+          <td>${esc(r.year || "")} ${esc(r.make || "")} ${esc(r.model_raw || "")}<div class="small muted">${esc(r.engine_family || "")}${r.status === "scratched" ? " · scratched" : ""}</div></td>
+          <td class="num">${num(r.miles)}</td>
+          ${r.locked ? `<td class="num">${money(r.p50)}</td><td class="num small">${money(r.p25)}–${money(r.p75)}</td>
+            <td class="num">${money(r.hammer.target)}</td><td class="num">${money(r.hammer.walk_away)}</td><td class="num"><b>${money(r.hammer.hard_ceiling)}</b></td>`
+          : `<td colspan="5" class="small muted">not locked</td>`}
+          <td class="num"><b>${r.actual != null ? money(r.actual) : "—"}</b>${r.actual_non_op ? ' <span class="chip high">non-op</span>' : ""}</td>
+          <td class="num">${r.err != null ? `${money(r.err)} <span class="small">(${fmtPct(r.err_pct)})</span>` : "—"}</td>
+          <td>${r.outcome ? `<span class="chip ${OUTCOME[r.outcome].cls}">${OUTCOME[r.outcome].label}</span>` : ""}</td>
+          <td>${r.confidence ? `<span class="chip conf-${r.confidence}">${r.confidence}</span>` : ""}</td></tr>`).join("")}
+      </table></div></div>`;
+  const apply = () => {
+    const q = $("#scQ").value.trim().toLowerCase(), only = $("#scOnly").checked;
+    let n = 0;
+    $$("#scTable tr[data-q]").forEach((tr) => { const ok = (!q || tr.dataset.q.includes(q)) && (!only || tr.dataset.has === "1"); tr.hidden = !ok; n += ok; });
+    $("#scCount").textContent = `${n} of ${d.rows.length} lots`;
+  };
+  $("#scQ").oninput = debounce(apply, 150); $("#scOnly").onchange = apply; apply();
 }
 
 // ------------------------------------------------------------------ manage data (delete & reload)

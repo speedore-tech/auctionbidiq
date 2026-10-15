@@ -60,6 +60,14 @@ LOCATIONS: dict[str, tuple[float, float, str]] = {
     "BOSTON": (42.3601, -71.0589, "MA"),
     "RICHMOND": (37.5407, -77.4360, "VA"),
     "LEBANON": (36.2081, -86.2911, "TN"),
+    # Taylor & Martin auction yards seen on result sheets / catalogs
+    "PEKIN": (40.5675, -89.6406, "IL"),
+    "HAMPTON": (33.3868, -84.2830, "GA"),
+    "TUNICA": (34.6851, -90.3829, "MS"),
+    "BURGETTSTOWN": (40.3815, -80.3926, "PA"),
+    "SALISBURY": (35.6710, -80.4742, "NC"),
+    "FREMONT": (41.4333, -96.4981, "NE"),
+    "HOUSTON TX": (29.7604, -95.3698, "TX"),
 }
 
 
