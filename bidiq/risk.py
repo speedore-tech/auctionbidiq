@@ -208,7 +208,7 @@ def risk_flags(lot: dict, settings: dict, sale_absolute: bool = True) -> list[di
         add("SCRATCHED", "high", "Scratched — withdrawn from the sale per the auction's mileage/hour sheet.")
     if lot.get("branded_title"):
         add("BRANDED_TITLE", "high", "Branded title — different market; excluded from comp stats.")
-    if lot.get("non_operable") or str(lot.get("lot_type") or "").upper() == "P":
+    if lot.get("non_operable"):
         add("NON_OPERABLE", "high", "Non-operable / parts lot.")
     if lot.get("tamper_flag"):
         add("ODOM_ECM_MISMATCH", "high", "Odometer vs ECM miles disagree — possible tamper.")

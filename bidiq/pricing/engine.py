@@ -10,13 +10,31 @@ Everything operates on plain dicts so it can be unit-tested and backtested witho
 """
 from __future__ import annotations
 
+import math
 from datetime import date
 
 from ..normalize import cross_shop_group, engine_weight, super_group
-from .stats import OLS, ecdf, norm_cdf, percentile
+from .stats import OLS, ecdf, norm_cdf, percentile, wpercentile
 
 TRACTOR_CLASSES = {"TRACTOR_SLEEPER", "TRACTOR_DAYCAB"}
 TRAILER_CLASSES = {"REEFER_TRAILER", "DRY_VAN_TRAILER"}
+
+B_WEIGHT = 0.8
+# Recent sales count more: a comp's weight halves every HALF_LIFE_DAYS before the target's sale date.
+# Neutral on 3 months of T&M data (Jul-Oct 2026 backtest); matters once comps span years.
+HALF_LIFE_DAYS: float | None = 120.0
+
+
+def recency_weight(c: dict, target_date) -> float:
+    if not HALF_LIFE_DAYS or not target_date or not isinstance(c.get("sale_date"), date):
+        return 1.0
+    days = (target_date - c["sale_date"]).days
+    return 0.5 ** (max(0, days) / HALF_LIFE_DAYS)
+
+
+def _target_date(spec: dict):
+    sd = spec.get("sale_date")
+    return sd if isinstance(sd, date) else date.today()
 
 MILES_STEPS = [(1, 50_000), (2, 75_000), (2, 100_000), (3, 150_000), (4, 250_000), (5, None), (None, None)]
 HOURS_STEPS = [(1, 1_500), (2, 2_500), (2, 4_000), (3, 6_000), (4, 10_000), (5, None), (None, None)]
@@ -75,7 +93,11 @@ def _scale(kind: str) -> float:
 
 # ------------------------------------------------------------------ Method B
 def fit_regression(spec: dict, comps: list[dict]) -> dict | None:
-    """Family-level OLS: price ≈ b0 + b_age·age + b_use·usage [+ b_eng·engine_weight]."""
+    """Family-level OLS on log price: ln(price) ≈ b0 + b_age·age + b_use·usage [+ b_eng·engine_weight].
+
+    Log price because trucks lose a *percentage* per year/mile, not a fixed dollar amount — a straight
+    line overprices old, cheap units (validated on real T&M results: reefer trailers were ~2x high).
+    """
     kind = usage_kind(spec.get("body_class"))
     metric = spec.get("hours_metric") if kind == "hours" else None
     fam_key = "model_group"
@@ -96,7 +118,7 @@ def fit_regression(spec: dict, comps: list[dict]) -> dict | None:
     use_eng = len(set(round(w, 2) for w in weights)) > 1 and spec.get("body_class") in TRACTOR_CLASSES | {"BOX_TRUCK", "STRAIGHT_TRUCK"}
 
     def design(features: list[str]):
-        X, y = [], []
+        X, y, wts = [], [], []
         for c in rows:
             x = [1.0]
             if "age" in features:
@@ -106,9 +128,11 @@ def fit_regression(spec: dict, comps: list[dict]) -> dict | None:
             if "eng" in features:
                 x.append(engine_weight(c.get("engine_family")))
             X.append(x)
-            y.append(float(c["sold_price"]))
-        return X, y
+            y.append(math.log(float(c["sold_price"])))
+            wts.append(recency_weight(c, tdate))
+        return X, y, wts
 
+    tdate = _target_date(spec)
     features = ["age"] + (["usage"] if use_usage else []) + (["eng"] if use_eng else [])
     model = None
     for _ in range(4):
@@ -116,9 +140,9 @@ def fit_regression(spec: dict, comps: list[dict]) -> dict | None:
             features.pop()  # drop least-essential covariate (eng, then usage) when data is thin
         if not features:
             return None
-        X, y = design(features)
+        X, y, wts = design(features)
         try:
-            model = OLS(X, y)
+            model = OLS(X, y, wts)
         except ValueError:
             return None
         # Depreciation must be non-positive; drop a counter-intuitive covariate and refit.
@@ -132,6 +156,7 @@ def fit_regression(spec: dict, comps: list[dict]) -> dict | None:
         return None
 
     coefs = dict(zip(["intercept"] + features, model.coef))
+    floor = float(percentile([float(c["sold_price"]) for c in fam], 5) or 0.0)
     x_t = [1.0]
     t_age = target_age(spec)
     if "age" in features:
@@ -140,8 +165,10 @@ def fit_regression(spec: dict, comps: list[dict]) -> dict | None:
         x_t.append(usage_of(spec, kind, metric) / _scale(kind))
     if "eng" in features:
         x_t.append(engine_weight(spec.get("engine_family")))
-    point = model.predict_point(x_t)
+    point = model.predict_point(x_t)          # log dollars
     se = model.predict_se(x_t)
+    dollars = math.exp(point)
+    q = lambda z: max(floor, math.exp(point + z * se))
     return {
         "family": spec.get("model_group") if fam_key == "model_group" else sg,
         "family_level": fam_key,
@@ -149,17 +176,25 @@ def fit_regression(spec: dict, comps: list[dict]) -> dict | None:
         "features": features,
         "coefs": coefs,
         "r2": round(model.r2, 3),
-        "sigma": round(model.sigma, 0),
-        "point": point,
+        "sigma": round(dollars * model.sigma, 0),   # ≈ typical $ scatter around the line at the target
+        "sigma_pct": round((math.exp(model.sigma) - 1) * 100, 1),
+        "point": dollars,
+        "log_point": point,
         "se": se,
-        "p25": max(0.0, point - 0.674 * se),
-        "p50": max(0.0, point),
-        "p75": max(0.0, point + 0.674 * se),
+        # a straight line extrapolated to very old / high-mile units can go to $0 or below;
+        # nothing in this family actually sells under its salvage level (5th percentile of real sales)
+        "floor": floor,
+        "p25": q(-0.674),
+        "p50": q(0.0),
+        "p75": q(0.674),
+        "p90": q(1.28),
         "usage_kind": kind,
         "usage_metric": metric,
-        "dollars_per_year": round(-coefs.get("age", 0.0), 0) if "age" in coefs else None,
-        "dollars_per_100k_miles": round(-coefs["usage"], 0) if "usage" in coefs and kind == "miles" else None,
-        "dollars_per_1k_hours": round(-coefs["usage"], 0) if "usage" in coefs and kind == "hours" else None,
+        # marginal $ at the target's own price level (log model: slope × predicted price)
+        "dollars_per_year": round(-coefs["age"] * dollars, 0) if "age" in coefs else None,
+        "pct_per_year": round((1 - math.exp(coefs["age"])) * 100, 1) if "age" in coefs else None,
+        "dollars_per_100k_miles": round(-coefs["usage"] * dollars, 0) if "usage" in coefs and kind == "miles" else None,
+        "dollars_per_1k_hours": round(-coefs["usage"] * dollars, 0) if "usage" in coefs and kind == "hours" else None,
     }
 
 
@@ -171,15 +206,17 @@ def adjust_price(c: dict, spec: dict, reg: dict | None) -> float:
     co = reg["coefs"]
     kind, metric = reg["usage_kind"], reg["usage_metric"]
     ta, ca = target_age(spec), comp_age(c)
+    delta = 0.0                                   # change in log price
     if "age" in co and ta is not None and ca is not None:
-        price += co["age"] * (ta - ca)
+        delta += co["age"] * (ta - ca)
     if "usage" in co:
         tu, cu = usage_of(spec, kind, metric), usage_of(c, kind, metric)
         if tu is not None and cu is not None:
-            price += co["usage"] * (tu - cu) / _scale(kind)
+            delta += co["usage"] * (tu - cu) / _scale(kind)
     if "eng" in co:
-        price += co["eng"] * (engine_weight(spec.get("engine_family")) - engine_weight(c.get("engine_family")))
-    return max(0.0, price)
+        delta += co["eng"] * (engine_weight(spec.get("engine_family")) - engine_weight(c.get("engine_family")))
+    delta = max(-1.386, min(1.386, delta))         # never move a comp by more than 4x either way
+    return max(reg.get("floor", 0.0), price * math.exp(delta))
 
 
 # ------------------------------------------------------------------ Method A
@@ -292,7 +329,11 @@ def predict(spec: dict, comps: list[dict], settings: dict, fmv: dict | None = No
     for c in cc:
         adj = adjust_price(c, spec, reg) if adjusted else float(c["sold_price"])
         comp_rows.append({**_comp_public(c), "adjusted_price": round(adj, 0)})
+    tdate = _target_date(spec)
+    for r, c in zip(comp_rows, cc):
+        r["weight"] = round(recency_weight(c, tdate), 3)
     values = [r["adjusted_price"] for r in comp_rows]
+    weights = [r["weight"] for r in comp_rows]
     raw_values = [float(c["sold_price"]) for c in cc]
 
     methods: dict = {}
@@ -302,7 +343,8 @@ def predict(spec: dict, comps: list[dict], settings: dict, fmv: dict | None = No
             "n": len(values),
             "band": band_label(cohort),
             "widen_step": cohort["step"],
-            "p25": percentile(values, 25), "p50": percentile(values, 50), "p75": percentile(values, 75),
+            "p25": wpercentile(values, weights, 25), "p50": wpercentile(values, weights, 50),
+            "p75": wpercentile(values, weights, 75),
             "min": min(values), "max": max(values),
             "raw_p50": percentile(raw_values, 50), "raw_max": max(raw_values),
         }
@@ -325,7 +367,7 @@ def predict(spec: dict, comps: list[dict], settings: dict, fmv: dict | None = No
         n = methods["A"]["n"]
         w["A"] = min(1.0, n / 10) / (1 + 0.25 * cohort["step"])
     if "B" in methods:
-        w["B"] = 0.8 * min(1.0, reg["n"] / 25)
+        w["B"] = B_WEIGHT * min(1.0, reg["n"] / 25)
     if "C" in methods:
         w["C"] = 1.0 if (extrapolated or not w) else 0.15
         if extrapolated:
@@ -338,20 +380,28 @@ def predict(spec: dict, comps: list[dict], settings: dict, fmv: dict | None = No
     tot = sum(w.values())
     w = {k: v / tot for k, v in w.items()}
     blend = {q: sum(w[k] * methods[k][q] for k in w) for q in ("p25", "p50", "p75")}
+    if reg:
+        blend = {q: max(reg["floor"], v) for q, v in blend.items()}
 
-    if "A" in methods:
+    # never let quantiles cross
+    blend["p25"] = min(blend["p25"], blend["p50"])
+    blend["p75"] = max(blend["p75"], blend["p50"])
+    spread_p90 = blend["p50"] + 1.28 * max(1.0, (blend["p75"] - blend["p25"]) / 1.349)
+    if "A" in methods and methods["A"]["n"] >= min_n and not extrapolated:
         ceiling_market = methods["A"]["max"]
         ceiling_src = "max of cohort (adjusted to target spec)" if adjusted else "max of cohort (proven market top)"
+    elif "A" in methods:
+        # a thin or extrapolated cohort is not a "proven market top" — one $2,500 comp must not cap the bid
+        ceiling_market = max(methods["A"]["max"], blend["p75"], spread_p90)
+        ceiling_src = f"~p90 of blended estimate (cohort too thin to set a market top: N={methods['A']['n']})"
+        assumptions.append(ceiling_src)
     elif "C" in methods:
         ceiling_market = methods["C"]["p75"]
         ceiling_src = "retail × high auction-discount (assumption — no comps)"
         assumptions.append(ceiling_src)
     else:
-        ceiling_market = blend["p75"] + 0.674 * (reg["se"] if reg else 0)
+        ceiling_market = max(blend["p75"], reg["p90"] if reg else 0)
         ceiling_src = "regression p90 (no cohort)"
-    # never let quantiles cross
-    blend["p25"] = min(blend["p25"], blend["p50"])
-    blend["p75"] = max(blend["p75"], blend["p50"])
 
     # win-probability basis
     empirical = len(values) >= min_n and not extrapolated
@@ -376,6 +426,7 @@ def predict(spec: dict, comps: list[dict], settings: dict, fmv: dict | None = No
         "comps": sorted(comp_rows, key=lambda r: r["adjusted_price"]),
         "win_basis": "empirical" if empirical else "modelled",
         "win_values": values if empirical else None,
+        "win_weights": weights if empirical else None,
         "win_sigma": sigma,
         "confidence": conf,
         "extrapolated": extrapolated,
@@ -387,13 +438,13 @@ def predict(spec: dict, comps: list[dict], settings: dict, fmv: dict | None = No
 def win_probability(pred: dict, bid: float) -> float:
     """P(win at bid B) = share of cohort comps that sold <= B (spec §8.4)."""
     if pred.get("win_basis") == "empirical" and pred.get("win_values"):
-        return ecdf(pred["win_values"], bid)
+        return ecdf(pred["win_values"], bid, pred.get("win_weights"))
     return norm_cdf((bid - pred["p50"]) / pred["win_sigma"])
 
 
 def bid_for_probability(pred: dict, p: float) -> float:
     if pred.get("win_basis") == "empirical" and pred.get("win_values"):
-        return percentile(pred["win_values"], p * 100)
+        return wpercentile(pred["win_values"], pred.get("win_weights"), p * 100)
     # invert normal by bisection
     lo, hi = pred["p50"] - 6 * pred["win_sigma"], pred["p50"] + 6 * pred["win_sigma"]
     for _ in range(60):

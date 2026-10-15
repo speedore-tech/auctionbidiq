@@ -24,10 +24,10 @@ def test_end_to_end(tmp_path):
     up = lambda h, vis: client.post("/api/ingest/results", headers=h, data={"visibility": vis},
                                     files={"file": ("res.pdf", pdf.read_bytes(), "application/pdf")})
     r = up(a, "private")
-    assert r.status_code == 200 and r.json()["rows"] == 7
+    assert r.status_code == 200 and r.json()["rows"] == len(SAMPLE_ROWS)
     r2 = up(a, "private")  # idempotent re-ingest
-    assert r2.json()["replaced"] == 7
-    assert len(client.get("/api/comps", headers=a).json()) == 7
+    assert r2.json()["replaced"] == len(SAMPLE_ROWS)
+    assert len(client.get("/api/comps", headers=a).json()) == len(SAMPLE_ROWS)
     assert len(client.get("/api/comps", headers=b).json()) == 0  # private comps isolated
 
     # catalog CSV -> target lots

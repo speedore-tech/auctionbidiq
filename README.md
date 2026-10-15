@@ -48,8 +48,13 @@ Tests: `python -m pytest`. Local Docker/Postgres: `docker compose up --build` (s
 | §12 outcomes + walk-forward backtest | `bidiq/services.py` (`backtest`), Outcomes page |
 | §16 per-tenant settings | `bidiq/config.py` (`DEFAULT_SETTINGS`), Settings page |
 
+### Accuracy on real data
+Walk-forward backtest on 10 Taylor & Martin sales (Jul–Oct 2026, 3,671 lots, each priced only from earlier sales):
+median error **24%** (High-confidence lots **20%**), overall bias +3%. Individual sales swing: Burgettstown 10/8 sold
+31% under the model, Pekin 8/6 sold 7% over. Re-run it any time on the Outcomes page.
+
 ### Pricing in one paragraph
-For a target spec the engine (1) fits a family OLS `price ≈ b0 + b_age·age + b_usage·usage [+ b_eng·engine weight]`
+For a target spec the engine (1) fits a family OLS on log price `ln(price) ≈ b0 + b_age·age + b_usage·usage [+ b_eng·engine weight]` (percentage depreciation, recent sales weighted more)
 (usage = miles, or same-metric reefer hours), (2) builds a cohort of same-model comps, auto-widening
 year/usage bands until N ≥ `min_cohort_n` (tractors also match engine family; only MD-box and 53' reefer
 groups may widen across models), (3) **adjusts each comp to the target's age/usage** with the regression

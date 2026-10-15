@@ -20,8 +20,8 @@ COLUMNS: list[tuple[str, float, float]] = [
     ("make", 90, 120),
     ("class", 120, 160),
     ("model", 160, 291),
-    ("engine", 291, 430),
-    ("desc", 430, 525),
+    ("engine", 286, 395),   # real T&M sheets: engine 292-~390, sleeper/body text from 397
+    ("desc", 395, 525),
     ("trans", 525, 625),  # overlaps miles 600-690; numeric tokens are claimed by miles first
 ]
 BRANDED_X = (660, 700)
@@ -94,12 +94,16 @@ def bucket_line(line: list[dict]) -> dict | None:
                 cols[name].append(t)
                 break
     lot = " ".join(cols["lot"]).strip()
+    # The TYPE column is the lot PREFIX ("T -" trailer lots, "M -" trucks, "P -"…), matching the
+    # catalog's T-76 / M-4 lot ids. Without it, trailer lot T-76 and tractor lot 76 collide.
+    prefix = re.sub(r"[^A-Z]", "", " ".join(cols["type"]).upper())
     year = normalize_year(" ".join(cols["year"]).strip())
     if not lot or not re.match(r"^[A-Z]?\d+[A-Z]?$", lot) or year is None or price is None:
         return None
+    lot_no = f"{prefix}-{lot}" if prefix else lot
     return {
-        "lot_type": (" ".join(cols["type"]).strip() or None),
-        "lot_no": lot,
+        "lot_type": prefix or None,
+        "lot_no": lot_no,
         "year": year,
         "make": " ".join(cols["make"]) or None,
         "class_raw": " ".join(cols["class"]) or None,

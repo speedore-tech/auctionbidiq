@@ -23,11 +23,31 @@ MAKE_MAP = {
     "HYUN": "HYUNDAI", "HYUNDAI": "HYUNDAI",
     "STOU": "STOUGHTON", "STOUGHTON": "STOUGHTON",
     "VANG": "VANGUARD", "VANGUARD": "VANGUARD", "CIMC": "VANGUARD",
+    "WESST": "WSTR", "WESTERN STAR": "WSTR",
+    "HYNDA": "HYUNDAI",
+    "CHEV": "CHEVROLET",
+    "MAC": "MAC",
 }
+
+# Result sheets truncate makes to 5 characters (UTILI, WABAS, VANGU, STOUG, REITN…) and sometimes
+# pad with a 0 (VANG0). Catalogs spell them out. Both resolve to the same canonical make via these names.
+FULL_MAKES = ["UTILITY", "WABASH", "VANGUARD", "HYUNDAI", "STOUGHTON", "REITNOUER", "WILSON", "FONTAINE",
+              "DOONAN", "MANAC", "TRANSCRAFT", "FRUEHAUF", "DORSEY", "EXTREME", "KENTUCKY", "BENSON", "PITTS",
+              "POLAR", "HEIL", "BRENNER", "TIMPTE", "LANDOLL", "TALBERT", "OTTAWA", "CAPACITY", "CHEVROLET",
+              "TRAILMOBILE", "LUFKIN", "STRICK", "CONWAY", "COTTRELL", "MOFFETT", "TREMCAR", "TRAIL KING",
+              "GREAT DANE", "WESTERN STAR", "INTERNATIONAL", "FREIGHTLINER", "KENWORTH", "PETERBILT",
+              "STEPHENS", "CHEETAH", "WALKER", "LUFKIN", "ATRO", "MAC", "HOBBS", "TRAVIS", "MERCEDES"]
 
 TRAILER_MAKES = {"UTIL", "GDAN", "WABASH", "HYUNDAI", "STOUGHTON", "VANGUARD", "KENTUCKY", "FRUEHAUF",
                  "DORSEY", "POLAR", "FONTAINE", "REITNOUER", "TRANSCRAFT", "HEIL", "WILSON", "BENSON",
-                 "EXTREME", "PITTS", "BRENNER", "TREMCAR", "TRAIL", "MANAC", "TRAILMOBILE", "LANDOLL"}
+                 "EXTREME", "PITTS", "BRENNER", "TREMCAR", "TRAIL", "MANAC", "TRAILMOBILE", "LANDOLL",
+                 "DOONAN", "TIMPTE", "TALBERT", "LUFKIN", "STRICK", "CONWAY", "COTTRELL", "STEPHENS",
+                 "CHEETAH", "WALKER", "TRAIL KING", "MAC", "HOBBS", "TRAVIS", "ATRO"}
+
+# Result-sheet CLASS codes for trailers and the trailer type each implies.
+TRAILER_CLASSES = {"VAN": "DRYVAN", "REEFR": "REEFER", "REEF": "REEFER", "FLAT": "FLATBED", "DROPD": "DROPDECK",
+                   "LOWBY": "DROPDECK", "DBLDR": "DROPDECK", "MACHY": "DROPDECK", "TANKR": "TANKER",
+                   "GRAIN": "DUMP_HOPPER", "ENDMP": "DUMP_HOPPER", "TRL": None}
 
 # (make, regex on model_raw, model_group). Ordered: first match wins.
 # NOTE: "M2 106" and "M2 106 BUSINESS CLAS" are the SAME group (Business Class is the
@@ -131,8 +151,20 @@ def norm_make(raw: str | None) -> str | None:
     s = clean(raw)
     if not s:
         return None
-    s1 = s.split(" ")[0]
-    return MAKE_MAP.get(s, MAKE_MAP.get(s1, s1))
+    if s in MAKE_MAP:
+        return MAKE_MAP[s]
+    s0 = re.sub(r"0+$", "", s)                      # "VANG0" -> "VANG"
+    if s0 in MAKE_MAP:
+        return MAKE_MAP[s0]
+    full = s
+    if len(s0) >= 3 and " " not in s0:
+        full = next((f for f in FULL_MAKES if f.startswith(s0)), s)   # "WABAS" -> "WABASH"
+    if full in MAKE_MAP:
+        return MAKE_MAP[full]
+    s1 = full.split(" ")[0]
+    if full in ("TRAIL KING",):
+        return "TRAIL KING"
+    return MAKE_MAP.get(s1, s1)
 
 
 TRAILER_TYPES: list[tuple[str, str]] = [
@@ -148,6 +180,10 @@ TRAILER_TYPES: list[tuple[str, str]] = [
 
 
 def trailer_type(*texts: str | None) -> str:
+    for x in texts:                                  # a result-sheet class code is definitive
+        k = TRAILER_CLASSES.get(clean(x))
+        if k:
+            return k
     t = " ".join(clean(x) for x in texts if x)
     for rx, kind in TRAILER_TYPES:
         if re.search(rx, t):
@@ -158,7 +194,8 @@ def trailer_type(*texts: str | None) -> str:
 def is_trailer(make: str | None, *hints: str | None) -> bool:
     mk = norm_make(make)
     h = " ".join(clean(x) for x in hints if x)
-    return mk in TRAILER_MAKES or bool(re.search(r"\bTRL\b|TRAILER", h))
+    return mk in TRAILER_MAKES or bool(re.search(r"\bTRL\b|TRAILER", h)) or \
+        any(clean(x) in TRAILER_CLASSES for x in hints if x)
 
 
 def model_group(make: str | None, model_raw: str | None, *hints: str | None) -> str | None:
@@ -226,15 +263,15 @@ def body_class(make: str | None, group: str | None, class_raw: str | None, desc_
     cls = clean(class_raw)
     desc = clean(desc_raw)
     sg = super_group(group)
-    if mk in TRAILER_MAKES or re.search(r"TRL|TRAILER|REEF|VAN\s*TRL", cls):
-        if re.search(r"REEF", cls + " " + desc + " " + (group or "")) or sg == "REEFER_53":
-            return "REEFER_TRAILER"
-        return "DRY_VAN_TRAILER"
+    if is_trailer(make, class_raw):
+        kind = trailer_type(class_raw, group, desc_raw)
+        return {"REEFER": "REEFER_TRAILER", "DRYVAN": "DRY_VAN_TRAILER"}.get(kind, "OTHER")
     if re.search(r"SLP|SLEEP|RAISED|MID\s*ROOF|HI\s*RISE|\d{2,3}\s*(IN|\")", desc) or sg == "SLEEPER_TRACTOR":
         if re.search(r"DAY", desc):
             return "TRACTOR_DAYCAB"
         return "TRACTOR_SLEEPER"
-    if re.search(r"DAY\s*CAB|\bDAY\b", desc) or re.search(r"TRAC|TRACTOR", cls):
+    # T&M result sheets class every tractor "CONV" (or CABOV); no sleeper text -> day cab
+    if re.search(r"DAY\s*CAB|\bDAY\b", desc) or re.search(r"TRAC|TRACTOR|^CONV$|^CABOV$", cls):
         return "TRACTOR_DAYCAB"
     if sg == "MD_BOX" or re.search(r"BOX|VAN\s*BODY|REEFER\s*BODY", desc):
         return "BOX_TRUCK"
@@ -271,8 +308,6 @@ def enrich(rec: dict) -> dict:
         rec["body_class"] = body_class(rec.get("make"), rec.get("model_group"), rec.get("class_raw"), rec.get("desc_raw"))
     if not rec.get("sleeper") and rec.get("desc_raw"):
         rec["sleeper"] = sleeper(rec["desc_raw"])
-    if rec.get("lot_type") and str(rec["lot_type"]).upper() == "P":
-        rec["non_operable"] = True
     yr = rec.get("year")
     sd = rec.get("sale_date")
     sale_year = sd.year if isinstance(sd, date) else date.today().year

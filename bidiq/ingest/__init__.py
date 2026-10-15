@@ -54,6 +54,26 @@ def log(db: Session, tenant_id, kind, filename, sale_id, rows, status="ok", mess
     return entry
 
 
+def _result_row_fixups(rec: dict) -> None:
+    """Trailer rows on T&M result sheets: MILES/HOURS holds reefer-unit hours (reefers) or nothing useful."""
+    from ..normalize import TRAILER_CLASSES, clean
+
+    cls = clean(rec.get("class_raw"))
+    if cls in TRAILER_CLASSES:
+        text = " ".join(clean(rec.get(k)) for k in ("model_raw", "engine_raw", "desc_raw", "trans_raw"))
+        if rec.get("miles") is not None:
+            if TRAILER_CLASSES[cls] == "REEFER" and rec.get("hours") is None:
+                rec["hours"], rec["hours_metric"] = float(rec["miles"]), "sheet"
+            rec["miles"] = None
+        if not rec.get("door_type"):
+            if re.search(r"SWING", text):
+                rec["door_type"] = "swing"
+            elif re.search(r"ROLL", text):
+                rec["door_type"] = "rollup"
+        if m := re.search(r"\b(\d{2})\s*FT", text):
+            rec.setdefault("body_length_ft", float(m.group(1)))
+
+
 def ingest_results(db: Session, parsed: ParsedSheet, tenant_id: int | None, source_file: str,
                    sale_id_override: str | None = None) -> dict:
     """Upsert a parsed result sheet. Re-ingesting replaces the sale's rows (keyed sale_id+lot_no)."""
@@ -76,6 +96,7 @@ def ingest_results(db: Session, parsed: ParsedSheet, tenant_id: int | None, sour
             continue
         seen.add(raw["lot_no"])
         rec = dict(raw, sale_id=sale_id, sale_date=sale.sale_date, location=sale.location, source_file=source_file)
+        _result_row_fixups(rec)
         enrich(rec)
         rec = fit_lengths(SoldComp, rec)
         comp = SoldComp(tenant_id=tenant_id, **{k: v for k, v in rec.items() if k in SPEC_FIELDS or k == "sold_price"})

@@ -125,7 +125,7 @@ def evaluate(db: Session, tenant_id: int, settings: dict, lot: dict, overrides: 
     sale_abs = sale.get("absolute", True) if sale else True
     base_flags = risk_flags(lot, settings, sale_abs)
     have = {f["code"] for f in base_flags}
-    if (lot.get("non_operable") or str(lot.get("lot_type") or "").upper() == "P") and rec.get("ok"):
+    if lot.get("non_operable") and rec.get("ok"):
         rec["notes"].insert(0, "Non-runner: these prices are for a running unit — knock off your repair estimate "
                                "before bidding.")
     risk = {
@@ -155,6 +155,7 @@ def _flag_msg(code: str) -> str:
 def _strip(pred: dict) -> dict:
     p = dict(pred)
     p.pop("win_values", None)
+    p.pop("win_weights", None)
     return p
 
 

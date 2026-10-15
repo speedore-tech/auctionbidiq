@@ -17,11 +17,37 @@ def percentile(values: list[float], q: float) -> float | None:
     return v[lo] + (v[hi] - v[lo]) * (pos - lo)
 
 
-def ecdf(values: list[float], x: float) -> float:
-    """Share of values <= x."""
+def ecdf(values: list[float], x: float, weights: list[float] | None = None) -> float:
+    """(Weighted) share of values <= x."""
     if not values:
         return 0.0
-    return sum(1 for v in values if v <= x) / len(values)
+    if not weights:
+        return sum(1 for v in values if v <= x) / len(values)
+    tot = sum(weights) or 1.0
+    return sum(w for v, w in zip(values, weights) if v <= x) / tot
+
+
+def wpercentile(values: list[float], weights: list[float] | None, q: float) -> float | None:
+    """Weighted percentile (q in 0..100); falls back to the plain percentile without weights."""
+    if not weights or len(set(round(w, 6) for w in weights)) == 1:
+        return percentile(values, q)
+    pairs = sorted((v, w) for v, w in zip(values, weights) if v is not None and w > 0)
+    if not pairs:
+        return None
+    if len(pairs) == 1:
+        return pairs[0][0]
+    tot = sum(w for _, w in pairs)
+    cum, pts = 0.0, []
+    for v, w in pairs:                       # midpoint CDF positions
+        pts.append(((cum + w / 2) / tot, v))
+        cum += w
+    t = q / 100.0
+    if t <= pts[0][0]:
+        return pts[0][1]
+    for (p0, v0), (p1, v1) in zip(pts, pts[1:]):
+        if t <= p1:
+            return v0 + (v1 - v0) * (t - p0) / ((p1 - p0) or 1.0)
+    return pts[-1][1]
 
 
 def norm_cdf(z: float) -> float:
@@ -48,7 +74,13 @@ def _invert(m: list[list[float]]) -> list[list[float]] | None:
 class OLS:
     """y = X·b (X includes the intercept column). Exposes residual std and leverage-aware PIs."""
 
-    def __init__(self, X: list[list[float]], y: list[float]):
+    def __init__(self, X: list[list[float]], y: list[float], w: list[float] | None = None):
+        if w:  # weighted least squares: scale each row by sqrt(weight), weights normalised to mean 1
+            m = sum(w) / len(w) or 1.0
+            r = [math.sqrt(x / m) for x in w]
+            X = [[v * ri for v in row] for row, ri in zip(X, r)]
+            y = [yy * ri for yy, ri in zip(y, r)]
+            self._sw = r
         self.n = len(y)
         self.k = len(X[0])
         xtx = [[sum(r[i] * r[j] for r in X) for j in range(self.k)] for i in range(self.k)]
@@ -60,8 +92,9 @@ class OLS:
         resid = [yy - self.predict_point(r) for r, yy in zip(X, y)]
         dof = max(1, self.n - self.k)
         self.sigma = math.sqrt(sum(e * e for e in resid) / dof)
-        ybar = sum(y) / self.n
-        sst = sum((yy - ybar) ** 2 for yy in y) or 1.0
+        ybar = sum(y) / self.n if not w else sum(yy * ri for yy, ri in zip(y, self._sw)) / (sum(ri * ri for ri in self._sw) or 1.0)
+        sst = (sum((yy - ybar) ** 2 for yy in y) if not w else
+               sum((yy - ybar * ri) ** 2 for yy, ri in zip(y, self._sw))) or 1.0
         self.r2 = 1 - sum(e * e for e in resid) / sst
 
     def predict_point(self, x: list[float]) -> float:

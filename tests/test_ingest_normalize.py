@@ -24,7 +24,15 @@ def test_parse_generated_tm_sheet(tmp_path):
     assert r["101"]["trans_raw"] == "ALLISON 2500"
     assert r["101"]["miles"] == 186_420 and r["101"]["sold_price"] == 41_500
     assert r["104"]["desc_raw"] == "73IN RAISED SLP" and r["104"]["trans_raw"] == "10 SPD"
-    assert r["106"]["non_operable"] and r["106"]["lot_type"] == "P"
+    assert r["106"]["non_operable"]
+    # TYPE column is the lot prefix: trailer T-101 does not collide with truck lot 101
+    t = r["T-101"]
+    assert t["lot_type"] == "T" and t["make"] == "UTILI" and t["class_raw"] == "REEFR" and t["sold_price"] == 21_000
+    from bidiq.ingest import _result_row_fixups
+    _result_row_fixups(t)
+    e = enrich(dict(t))
+    assert e["make"] == "UTIL" and e["model_group"] == "UTIL_REEFER" and e["body_class"] == "REEFER_TRAILER"
+    assert e["hours"] == 19_806 and e["miles"] is None and e["door_type"] == "swing"
     assert r["107"]["branded_title"] and not r["107"]["non_operable"]
 
 
@@ -63,7 +71,10 @@ def test_body_class_and_enrich():
     assert body_class("UTIL", "UTIL_3000R", "REEF TRL", "53FT REEFER") == "REEFER_TRAILER"
     rec = enrich({"make": "INTER", "model_raw": "MV607", "year": 2020, "miles": 120_000, "lot_type": "P",
                   "sale_date": date(2026, 5, 1)})
-    assert rec["make"] == "INTL" and rec["non_operable"] is True
+    assert rec["make"] == "INTL" and not rec.get("non_operable")   # P is a lot prefix, not "parts"
+    assert body_class("VOLVO", "VOLVO_VNR", "CONV", None) == "TRACTOR_DAYCAB"
+    from bidiq.normalize import norm_make
+    assert [norm_make(m) for m in ("WABAS", "UTILI", "VANG0", "HYNDA", "STOUG", "GREAT", "WESST", "UTILITY", "GREAT DANE")] ==         ["WABASH", "UTIL", "VANGUARD", "HYUNDAI", "STOUGHTON", "GDAN", "WSTR", "UTIL", "GDAN"]
     assert rec["age_years"] == 6.5 and rec["miles_per_year"] == round(120_000 / 6.5)
 
 

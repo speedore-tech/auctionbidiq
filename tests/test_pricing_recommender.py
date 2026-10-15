@@ -18,12 +18,17 @@ def spec(**kw):
     return enrich(base)
 
 
-def test_regression_recovers_slopes(settings):
+def test_regression_fits_depreciation(settings):
     comps = make_comps(n=120, noise=0.02)
     reg = fit_regression(spec(), comps)
     assert reg and "usage" in reg["features"]
-    assert abs(reg["dollars_per_100k_miles"] - 2585) < 500
-    assert abs(reg["dollars_per_year"] - 5461) < 900
+    # synthetic truth for a 2020 LT625 with 450k mi sold mid-2026 (age 6.5)
+    truth = 85000 - 5461 * 6 - 2585 * 4.5
+    assert abs(reg["p50"] - truth) / truth < 0.10
+    # log model: marginal $ effects at the target's price level, same order as the true slopes
+    assert 0.5 * 2585 < reg["dollars_per_100k_miles"] < 2.0 * 2585
+    assert 0.5 * 5461 < reg["dollars_per_year"] < 2.0 * 5461
+    assert reg["p25"] <= reg["p50"] <= reg["p75"] and reg["p25"] >= reg["floor"]
 
 
 def test_mileage_moves_the_number(settings):
@@ -136,3 +141,17 @@ def test_vin_cdl_warranty(settings):
     assert w["eligible"]
     assert not warranty_check(2021, 400_000, 25_999, "BOX_TRUCK", settings, date(2026, 5, 1))["eligible"]
     assert not warranty_check(2015, 100_000, 25_999, "BOX_TRUCK", settings, date(2026, 5, 1))["eligible"]
+
+
+def test_one_thin_comp_does_not_cap_the_ceiling(settings):
+    """Seen in production: a single $2,500 M2 comp became the 'market top' and capped every M2 bid."""
+    one = [dict(c, sold_price=2500) for c in make_comps(model_raw="M2 106", make="FRTL", engine="CUMMINS ISB 6.7",
+                                                        class_raw="TRUCK", desc="", n=1, years=[2009])]
+    m2 = enrich({"make": "FRTL", "model_raw": "M2 106", "engine_raw": "CUMMINS ISB", "class_raw": "TRUCK",
+                 "year": 2019, "miles": 295_000, "sale_date": SD})
+    fmv = {"value": 60_000, "tier": "private", "as_of": "2026-04-01", "stale": False}
+    p = predict(m2, one, settings, fmv)
+    assert p["ok"] and p["methods"]["A"]["n"] == 1
+    r = recommend(p, {"body_class": "BOX_TRUCK", "transport_miles": 0}, settings, None, fmv, {})
+    assert r["hammer"]["hard_ceiling"] > 20_000          # not pinned to the lone $2,500 sale
+    assert "thin" in p["max_source"]

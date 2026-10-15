@@ -49,20 +49,23 @@ def render(path: str | Path, header: str, rows: list[dict]) -> None:
 
 
 SAMPLE_ROWS = [
-    {"type": "M", "lot": "101", "year": "2019", "make": "FRTL", "class": "TRUCK", "model": "M2 106 BUSINESS CLAS",
+    {"lot": "101", "year": "2019", "make": "FRTL", "class": "TRUCK", "model": "M2 106 BUSINESS CLAS",
      "engine": "CUMMINS ISB 6.7 LIT", "desc": "", "trans": "ALLISON 2500", "miles": 186_420, "price": 41_500},
-    {"type": "M", "lot": "102", "year": "2019", "make": "FRTL", "class": "TRUCK", "model": "M2 106",
+    {"lot": "102", "year": "2019", "make": "FRTL", "class": "TRUCK", "model": "M2 106",
      "engine": "CUMMINS 6.7 LITER", "desc": "", "trans": "ALLISON AUTO", "miles": 221_004, "price": 38_000},
-    {"type": "M", "lot": "103", "year": "2020", "make": "INTER", "class": "TRUCK", "model": "MV607",
+    {"lot": "103", "year": "2020", "make": "INTER", "class": "TRUCK", "model": "MV607",
      "engine": "CUMMINS B6.7", "desc": "", "trans": "ALLISON 2500", "miles": 143_877, "price": 47_250},
-    {"type": "M", "lot": "104", "year": "2020", "make": "INTER", "class": "CONV", "model": "LT625",
+    {"lot": "104", "year": "2020", "make": "INTER", "class": "CONV", "model": "LT625",
      "engine": "NAVISTAR A26", "desc": "73IN RAISED SLP", "trans": "10 SPD", "miles": 416_000, "price": 31_000},
-    {"type": "M", "lot": "105", "year": "2020", "make": "INTER", "class": "CONV", "model": "LT625",
+    {"lot": "105", "year": "2020", "make": "INTER", "class": "CONV", "model": "LT625",
      "engine": "CUMMINS X15", "desc": "73IN RAISED SLP", "trans": "ENDURANT", "miles": 1_004_000, "price": 20_000},
-    {"type": "P", "lot": "106", "year": "2017", "make": "FRTL", "class": "TRUCK", "model": "M2 106",
+    {"lot": "106", "year": "2017", "make": "FRTL", "class": "TRUCK", "model": "M2 106",
      "engine": "CUMMINS ISB 6.7", "desc": "", "trans": "ALLISON", "miles": 301_000, "nonop": True, "price": 9_000},
-    {"type": "M", "lot": "107", "year": "2018", "make": "FRTL", "class": "TRUCK", "model": "M2 112",
+    {"lot": "107", "year": "2018", "make": "FRTL", "class": "TRUCK", "model": "M2 112",
      "engine": "DETROIT DD8", "desc": "", "trans": "ALLISON 3000", "miles": 255_500, "branded": True, "price": 22_500},
+    # trailer lots carry a "T -" prefix in the TYPE column; reefer rows put unit HOURS in MILES/HOURS
+    {"type": "T -", "lot": "101", "year": "2019", "make": "UTILI", "class": "REEFR", "model": "53FT. ALUMINUM REEFER",
+     "engine": "CARRIER X4 7300 UNIT", "desc": "SWING DOORS", "trans": "", "miles": 19_806, "price": 21_000},
 ]
 
 if __name__ == "__main__":
